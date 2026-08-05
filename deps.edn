@@ -1,0 +1,16 @@
+{:paths ["src"]
+ :deps {io.github.kotoba-lang/org-iso-pdf
+        {:git/url "https://github.com/kotoba-lang/org-iso-pdf.git"
+         :git/sha "752f2837a118031d2f438271163bf3441ea9c172"}}
+ :aliases
+ {:test {:extra-paths ["test"]
+         :extra-deps {org.clojure/clojure {:mvn/version "1.11.1"}
+                      io.github.cognitect-labs/test-runner
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts ["-m" "cognitect.test-runner"]
+         :exec-fn cognitect.test-runner.api/test}
+  :local {:override-deps {io.github.kotoba-lang/org-iso-pdf
+                          {:local/root "../org-iso-pdf"}}}
+  :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
+         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
+                     "--fail-level" "error"]}}}

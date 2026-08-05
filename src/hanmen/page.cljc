@@ -54,12 +54,20 @@
   that has somewhere to fetch pixels from can draw it; one that has not falls
   back to outlining the region, which is what `hanmen.svg` does by default.
 
+  `:path` is everything a pen draws that is not an axis-aligned rectangle: a
+  curve, a diagonal, a polygon, a chart's plot line. It carries the path
+  already flattened into reader space, so a drawer emits it and does not do
+  geometry. `:rule` stays a separate kind rather than becoming a four-corner
+  path, because a rectangle is most of what documents actually draw and a
+  consumer that lays marks out itself can reason about a box and cannot
+  reason about a cubic.
+
   `:frame` is the honest one. A shading, a pattern, a `/Type0` run nobody can
   decode: a region of the page whose contents this does not have, where a
   viewer that drew nothing would show a page that looks complete and is not.
   So the region is placed, named and marked as undrawn. Silence is the one
   thing it must not be."
-  #{:text :rule :image :frame})
+  #{:text :rule :path :image :frame})
 
 ;; ── geometry ─────────────────────────────────────────────────────────────────
 
@@ -82,6 +90,24 @@
      0.0
      (let [f (Math/pow 10 places)]
        (double (/ (Math/round (* (double n) f)) f))))))
+
+(defn num->str
+  "`200` rather than `200.0`, and `1.235` rather than `1.2349999999`.
+
+  Not cosmetic at this scale: path data is the largest thing in a rendering
+  and carries four numbers per curve, so two characters each is real bytes
+  in every response. Rounding first and dropping an integral tail is also
+  what makes two runs byte-identical, which a digest over a rendering needs.
+
+  Here rather than in `hanmen.svg` because `hanmen.pdf` builds path data and
+  would otherwise have its own copy — and two spellings of a number is how
+  two renderings of one page stop being equal."
+  [n]
+  (let [r (round n 3)
+        truncated #?(:clj (Math/floor r) :cljs (js/Math.floor r))]
+    (if (== r truncated)
+      (str #?(:clj (long r) :cljs (js/Math.trunc r)))
+      (str r))))
 
 (defn item
   "One placed mark.
@@ -152,6 +178,33 @@
                         :item/width (round width) :item/height (round height)
                         :item/index index}
                  (seq media-type) (assoc :item/media-type (str media-type)))))
+
+(defn path-item
+  "A drawn path, in reader space.
+
+  `d` is SVG path data — already transformed, already flattened to absolute
+  coordinates. Keeping the format rather than inventing a segment vocabulary
+  is a real decision and not laziness: every drawer this could have targets
+  it (SVG, Canvas's `Path2D`, CoreGraphics via a parser), the grammar is
+  tiny and closed, and a segment vocabulary would be a second spelling of it
+  that every consumer has to translate back.
+
+  `fill` and `stroke` are ink densities or nil. Both nil is a path that was
+  constructed and never painted, which is a clip path or a mistake, and
+  `hanmen.pdf` does not emit one.
+
+  `x`/`y`/`width`/`height` are the path's bounding box, and it is not
+  optional: without one a path cannot be clipped to the page, cannot be laid
+  out by a consumer, and cannot be told apart from a mark that is nowhere.
+  Every other kind has an extent and this one needs the same."
+  [{:keys [d fill stroke stroke-width x y width height]}]
+  (item :path (cond-> {:item/d (str d)
+                       :item/x (round x) :item/y (round y)
+                       :item/width (round width) :item/height (round height)}
+                (finite? fill) (assoc :item/fill (round fill 3))
+                (finite? stroke) (assoc :item/stroke (round stroke 3))
+                (finite? stroke-width) (assoc :item/stroke-width
+                                              (round stroke-width 2)))))
 
 (defn frame-item
   "A region whose contents are not decoded — see `item-kinds`."

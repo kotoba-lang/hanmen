@@ -332,6 +332,70 @@
       (is (= 2 (count runs)))
       (is (neg? (:item/x (second runs))) "and it really did start off the left"))))
 
+(deftest a-curve-is-drawn-not-outlined
+  ;; The gap: a figure made of beziers produced nothing at all. `re … f` was
+  ;; the only path this understood, so a chart, a logo and a signature were
+  ;; all equally invisible.
+  (let [p (page-of "0 g 10 10 m 20 40 30 40 40 10 c f")
+        [path] (filterv #(= :path (:item/kind %)) (:page/items p))]
+    (is (some? path))
+    (is (str/starts-with? (:item/d path) "M10 832"))
+    (is (str/includes? (:item/d path) "C") "the curve is a curve")
+    (is (= 1.0 (:item/fill path)))
+    (is (nil? (:item/stroke path)) "filled, not stroked"))
+
+  (testing "and its bounding box is the control hull, which is never too small"
+    ;; A cubic stays inside its control points, so the box can be larger
+    ;; than the ink and never smaller — the safe direction for something
+    ;; whose job is deciding what to throw away.
+    (let [p (page-of "0 g 10 10 m 20 40 30 40 40 10 c f")
+          [path] (filterv #(= :path (:item/kind %)) (:page/items p))]
+      (is (= 10.0 (:item/x path)))
+      (is (= 30.0 (:item/width path)) "40 − 10"))))
+
+(deftest a-stroke-and-a-fill-are-different-ink
+  ;; Lower case sets the fill colour and upper case the stroke. Treating
+  ;; them as one is how a hairline table border ends up the colour of the
+  ;; cell behind it.
+  (let [p (page-of "0 g 1 G 2 w 10 10 m 100 10 l S")
+        [path] (filterv #(= :path (:item/kind %)) (:page/items p))]
+    (is (nil? (:item/fill path)) "S strokes and does not fill")
+    (is (= 0.0 (:item/stroke path)) "1 G is white, which is no ink")
+    (is (= 2.0 (:item/stroke-width path))))
+
+  (testing "and B does both"
+    (let [p (page-of "0.5 g 0 G 10 10 m 100 10 l 100 100 l h B")
+          [path] (filterv #(= :path (:item/kind %)) (:page/items p))]
+      (is (= 0.5 (:item/fill path)))
+      (is (= 1.0 (:item/stroke path))))))
+
+(deftest v-and-y-are-curves-and-not-lines
+  ;; Each implies one control point. Drawing either as a line is a curve
+  ;; drawn straight, which looks like a rendering that nearly works.
+  (doseq [op ["v" "y"]]
+    (let [p (page-of (str "0 g 10 10 m 20 40 40 10 " op " f"))
+          [path] (filterv #(= :path (:item/kind %)) (:page/items p))]
+      (is (str/includes? (:item/d path) "C") op))))
+
+(deftest a-path-of-only-rectangles-is-still-rules
+  ;; `re … f` is most of what documents draw, and a box is worth more to a
+  ;; consumer that lays marks out than a closed four-segment path is.
+  (let [p (page-of (str "0 g " (pdf/rect-command {:x 10 :y 10 :width 20 :height 5
+                                                  :fill? true})))]
+    (is (= 1 (count (filterv #(= :rule (:item/kind %)) (:page/items p)))))
+    (is (empty? (filterv #(= :path (:item/kind %)) (:page/items p)))))
+
+  (testing "but a rectangle joined to a curve is one path"
+    (let [p (page-of "0 g 10 10 20 5 re 30 30 m 40 50 50 50 60 30 c f")]
+      (is (= 1 (count (filterv #(= :path (:item/kind %)) (:page/items p)))))
+      (is (empty? (filterv #(= :rule (:item/kind %)) (:page/items p)))))))
+
+(deftest a-path-that-is-never-painted-leaves-nothing
+  ;; `n` ends a path without painting it — it is how a clip is set. A reader
+  ;; that drew it would paint every clip region.
+  (let [p (page-of "0 g 10 10 m 100 100 l n")]
+    (is (empty? (filterv #(= :path (:item/kind %)) (:page/items p))))))
+
 ;; ── XObjects ─────────────────────────────────────────────────────────────────
 
 (defn- xobject-doc

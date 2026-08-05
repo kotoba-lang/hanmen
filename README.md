@@ -72,6 +72,30 @@ No element here takes a URL, so the fragment loads nothing and the host's CSP
 does not have to be widened to show a page. Deciding what a page may load is a
 decision on its own, not a side effect of adding a viewer.
 
+## Paths, not only rectangles
+
+`re … f` was the only path this understood, so a chart, a logo and a
+signature were all equally invisible. Every construction operator is run now
+— `m` `l` `c` `v` `y` `h` `re` — and every painting one decides what the
+accumulated path becomes. Across 47 real documents that is **28,966 paths
+that previously produced nothing at all**.
+
+A path made only of rectangles still becomes `:rule`s, one per rectangle,
+because `re … f` is most of what documents draw and a box is worth more to a
+consumer laying marks out than a closed four-segment path. Mix a rectangle
+with a curve and it is one `:path`.
+
+`d` is SVG path data, already transformed into reader space — every drawer
+this could target accepts it, the grammar is tiny and closed, and a segment
+vocabulary would be a second spelling every consumer has to translate back.
+The bounding box is the control hull, so it can be larger than the ink and
+never smaller: the safe direction for a value whose job is deciding what to
+throw away.
+
+Fill and stroke carry separate ink, because lower-case colour operators set
+one and upper-case the other — treating them as one is how a hairline table
+border ends up the colour of the cell behind it.
+
 ## Ink, and text that is knocked out of it
 
 Every fill-colour operator records ink — `g`, `rg`, `k`, and the
@@ -155,7 +179,9 @@ why these are two functions.
 
 - **No raster decoding.** `FlateDecode` samples come back raw; encoding them to
   something a browser renders is the host's job (`kotoba-lang/org-w3-png`).
-- **No paths, shading or transparency groups.** Only `re … f` becomes a rule.
+- **No shading, patterns or transparency groups.** `sh` paints the clip
+  region, and the clip path is not tracked; a pattern fill leaves the
+  previous colour rather than inventing an average.
 - **No CID→Unicode without `/ToUnicode`.** Measured at 3 of 30 files, 553 runs,
   550 of them in one LaTeX-CJK document. The frame names the ordering it would
   need.
@@ -172,7 +198,7 @@ clojure -M:test         # pinned git deps
 clojure -M:lint
 ```
 
-56 tests / 194 assertions. Every placement assertion is a coordinate against a
+61 tests / 213 assertions. Every placement assertion is a coordinate against a
 PDF the test wrote, not a rendering somebody looked at.
 
 Measured out of sample against 30 real PDFs: 12,584 text runs, 2,083 rules, 57

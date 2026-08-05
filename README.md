@@ -182,9 +182,16 @@ why these are two functions.
 - **No shading, patterns or transparency groups.** `sh` paints the clip
   region, and the clip path is not tracked; a pattern fill leaves the
   previous colour rather than inventing an average.
-- **No CID→Unicode without `/ToUnicode`.** Measured at 3 of 30 files, 553 runs,
-  550 of them in one LaTeX-CJK document. The frame names the ordering it would
-  need.
+- **No CID→Unicode without `/ToUnicode`.** Measured across 160 documents and
+  576 `/Type0` fonts: 549 ship one and are read; 25 do not and are
+  `CIDFontType0C`; 2 have no embedded font; **zero** are the SFNT case an
+  embedded-`cmap` fallback would have fixed. Bare CFF has no `cmap` table, so
+  decoding those needs its charset plus a registry CMap resource
+  (Adobe-Japan1-UCS2 and siblings), and neither exists here yet. The frame
+  names both the ordering and the font kind so the next person does not
+  repeat that dead end. `opentype.cmap` was written for the fallback and is
+  deliberately NOT wired in — a dependency for a path that fires on zero of
+  576 fonts is not a dependency.
 - **No zoom or pan.** `fit` answers the one number a server-side render needs.
   Viewport gestures are `kotoba-lang/canvaskit`'s subject.
 - **No writing.** A viewer that can rewrite what it is showing is a different

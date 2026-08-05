@@ -272,7 +272,10 @@
     (is (empty? (texts p)))
     (is (= :frame (:item/kind f)))
     (is (= :font/no-tounicode (:item/reason f)))
-    (is (= "KozMin" (:item/label f)))
+    ;; The label names the font AND what kind of file is embedded, because
+    ;; that is what decides which decoder is missing: a bare CFF has no
+    ;; cmap to read and needs a registry CMap resource instead.
+    (is (= "KozMin (none)" (:item/label f)))
     (is (page/scanned? p) "and the page says a search cannot see it")))
 
 (deftest every-fill-colour-operator-records-ink

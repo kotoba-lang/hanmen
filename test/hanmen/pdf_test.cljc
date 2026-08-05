@@ -237,6 +237,27 @@
                      #?(:clj (.getBytes ^String text "ISO-8859-1")
                         :cljs (map #(.charCodeAt text %) (range (count text))))))))
 
+(defn- composite-doc-with-encoding
+  "A one-page PDF whose /Type0 font uses `enc` and shows `hex` (a `<…>`
+  string operand)."
+  [enc hex]
+  (let [text (str "%PDF-1.4\n"
+                  "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+                  "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+                  "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] "
+                  "/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n"
+                  "4 0 obj\n<< /Length 60 >>\nstream\n"
+                  "BT /F1 12 Tf 1 0 0 1 10 50 Tm " hex " Tj ET\nendstream\nendobj\n"
+                  "5 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Ryumin "
+                  "/DescendantFonts [9 0 R] /Encoding /" enc " >>\nendobj\n"
+                  "9 0 obj\n<< /Type /Font /Subtype /CIDFontType0 "
+                  "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) "
+                  "/Supplement 6 >> >>\nendobj\n"
+                  "trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n")]
+    (pdf/parse (mapv #(bit-and (int %) 0xff)
+                     #?(:clj (.getBytes ^String text "ISO-8859-1")
+                        :cljs (map #(.charCodeAt text %) (range (count text))))))))
+
 (deftest a-two-byte-code-is-read-through-tounicode
   ;; Identity-H codes are glyph ids, not characters. This is the path every
   ;; Japanese PDF takes, and reading it as one byte per code produces
@@ -268,6 +289,46 @@
            (select-keys (hpdf/parse-tounicode
                          "beginbfrange\n<0041> <0042> [<0041> <005A>]\nendbfrange")
                         [0x41 0x42])))))
+
+(deftest a-predefined-encoding-splits-its-own-codes
+  ;; `90ms-RKSJ-H` is Shift-JIS: one byte or two, declared in the CMap. A
+  ;; reader that assumed two splits every ASCII character in half and
+  ;; produces twice as many wrong characters as there were right ones.
+  ;;
+  ;; Both halves come from the resolver — the widths are data in a file this
+  ;; library does not read, so splitting here would be guessing at Shift-JIS.
+  (let [;; <41> is one byte (A), <82A0> is two (あ).
+        doc (composite-doc-with-encoding "90ms-RKSJ-H" "<4182A042>")
+        resolver (fn [n]
+                   (when (= "90ms-RKSJ-H" n)
+                     {:split (fn [bytes]
+                               ;; One byte below 0x81, two from 0x81.
+                               (loop [i 0 out []]
+                                 (cond
+                                   (>= i (count bytes)) out
+                                   (< (nth bytes i) 0x81)
+                                   (recur (inc i) (conj out (nth bytes i)))
+                                   :else
+                                   (recur (+ i 2)
+                                          (conj out (+ (* 256 (nth bytes i))
+                                                       (nth bytes (inc i) 0)))))))
+                      :text {0x41 "A" 0x82A0 "あ" 0x42 "B"}}))
+        p (hpdf/page-at doc 0 {:encoding->cmap resolver})
+        [t] (filterv #(= :text (:item/kind %)) (:page/items p))]
+    (is (= "AあB" (:item/text t))
+        "three codes of two different widths, not two codes of one"))
+
+  (testing "and without a resolver it stays a frame rather than mojibake"
+    (let [p (hpdf/page-at (composite-doc-with-encoding "90ms-RKSJ-H" "<4182A042>") 0)]
+      (is (empty? (filterv #(= :text (:item/kind %)) (:page/items p))))))
+
+  (testing "Identity-H is not sent to the resolver"
+    ;; It is not a predefined table lookup — the code IS the CID, and asking
+    ;; would either miss or return the wrong table.
+    (let [asked (atom [])
+          _ (hpdf/page-at (composite-doc nil) 0
+                          {:encoding->cmap (fn [n] (swap! asked conj n) nil)})]
+      (is (empty? @asked)))))
 
 (deftest a-registry-table-reads-a-font-that-shipped-no-tounicode
   ;; The 25-of-576 case: a CIDFontType0C with no /ToUnicode. The collection

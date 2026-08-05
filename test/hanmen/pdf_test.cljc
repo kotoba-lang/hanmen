@@ -66,12 +66,45 @@
   ;; One BT, one Tm, three shows. A reader that does not advance the text
   ;; matrix stacks all three on one spot — and because the first one is
   ;; right, it looks like it works.
+  ;;
+  ;; Asserted through `coalesce`, which joins them precisely BECAUSE the
+  ;; advance put each one where the last one ended. A reader that did not
+  ;; advance would leave three runs at one x, and they would not join.
   (let [p (page-of (str "BT /F1 10 Tf 1 0 0 1 50 700 Tm "
                         "(one) Tj (two) Tj (three) Tj ET"))
-        xs (mapv :item/x (texts p))]
-    (is (= 3 (count xs)))
-    (is (apply < xs) "each run starts to the right of the last")
-    (is (= 50.0 (first xs)))))
+        runs (texts p)]
+    (is (= 1 (count runs)) "contiguous, so one run")
+    (is (= "onetwothree" (:item/text (first runs))))
+    (is (= 50.0 (:item/x (first runs)))))
+
+  (testing "and runs that are NOT contiguous stay apart"
+    ;; The same three shows with the pen moved between them. A coalescer
+    ;; that joined on baseline alone would run a two-column line together.
+    (let [p (page-of (str "BT /F1 10 Tf 1 0 0 1 50 700 Tm (one) Tj "
+                          "1 0 0 1 300 700 Tm (two) Tj ET"))
+          runs (texts p)]
+      (is (= 2 (count runs)))
+      (is (= [50.0 300.0] (mapv :item/x runs))))))
+
+(deftest a-producer-that-emits-one-glyph-at-a-time-still-yields-words
+  ;; Measured on a real audit report: 52 runs for one line, so `text-of`
+  ;; returned ["O" "p" "e" "n" …]. That is not a search index and not a
+  ;; quotation, and drawn in a font that is not the document's it reads as
+  ;; `Cont r act s`.
+  (let [p (page-of (str "BT /F1 10 Tf 1 0 0 1 0 700 Tm "
+                        "(H) Tj (e) Tj (l) Tj (l) Tj (o) Tj ET"))]
+    (is (= ["Hello"] (page/text-of p)))
+    (is (= 1 (count (texts p)))))
+
+  (testing "a gap wide enough to be a space becomes one"
+    (let [p (page-of (str "BT /F1 10 Tf 1 0 0 1 0 700 Tm (Hi) Tj "
+                          "1 0 0 1 14 700 Tm (there) Tj ET"))]
+      (is (= ["Hi there"] (page/text-of p)))))
+
+  (testing "and a different size is a different piece of type"
+    (let [p (page-of (str "BT /F1 10 Tf 1 0 0 1 0 700 Tm (a) Tj "
+                          "/F1 20 Tf (b) Tj ET"))]
+      (is (= 2 (count (texts p)))))))
 
 (deftest a-line-break-uses-the-leading-not-the-last-position
   ;; `T*` moves relative to the line matrix, not the text matrix. Using the

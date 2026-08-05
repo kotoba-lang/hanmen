@@ -121,6 +121,23 @@ refuses anything that is not a same-origin path:
 Without it the region is outlined like a frame and **the fragment loads
 nothing**, so a host that has not decided its CSP is not forced to.
 
+## One `Tj` per glyph is a real thing producers do
+
+An audit-report cover emitted **52 runs for one line**, so `text-of` returned
+`["O" "p" "e" "n" …]` — not a search index and not a quotation. Drawn in a
+font that is not the document's, each glyph at its own document x, it read as
+`Cont r act s`, and a reader blames the renderer.
+
+`coalesce` joins runs that are exactly contiguous — the pen's end position is
+known from the advance, so it is an equality test and not a guess. Three
+outcomes, because a gap means three things: nothing is one word, a word space
+is one phrase with the space put back, and anything wider ends the run. That
+last threshold is what stops a two-column line becoming one sentence.
+
+Measured across 47 real documents: text runs 11,568 → 5,681, runs of a single
+character 72.4% → 38.0%, and characters 20,909 → **27,276** — the rise is the
+word spaces coming back.
+
 ## Reading order is a guess, kept apart from the fact
 
 `text-of` is what the document says in the order it said it. `reading-order`
@@ -155,7 +172,7 @@ clojure -M:test         # pinned git deps
 clojure -M:lint
 ```
 
-55 tests / 188 assertions. Every placement assertion is a coordinate against a
+56 tests / 194 assertions. Every placement assertion is a coordinate against a
 PDF the test wrote, not a rendering somebody looked at.
 
 Measured out of sample against 30 real PDFs: 12,584 text runs, 2,083 rules, 57

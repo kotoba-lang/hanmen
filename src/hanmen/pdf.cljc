@@ -444,6 +444,127 @@
         (+ (* 0.299 r) (* 0.587 g) (* 0.114 b)))
     previous))
 
+
+;; ── paths ────────────────────────────────────────────────────────────────────
+
+(defn- device
+  "A path point, through the CTM, in reader space."
+  [state x y]
+  (mapv #(page/round % 3) (apply-point (:ctm state) [(double x) (double y)])))
+
+(defn- pt
+  "A path point as the two numbers path data wants."
+  [[x y]]
+  (str (page/num->str x) " " (page/num->str y)))
+
+(defn- seg [state s] (update state :path (fnil conj []) s))
+
+(defn- extend-bounds
+  "The running bounding box of the path being built.
+
+  Over the CONTROL points of a curve, not its true extent. A cubic stays
+  inside the hull of its control points, so this can be larger than the ink
+  and never smaller — and being larger only means a mark near the edge is
+  kept when it could have been dropped, which is the safe direction for
+  something whose whole job is deciding what to throw away."
+  [state [x y]]
+  (update state :bounds
+          (fn [[x0 y0 x1 y1]]
+            (if x0
+              [(min x0 x) (min y0 y) (max x1 x) (max y1 y)]
+              [x y x y]))))
+
+(defn- move-to [state x y]
+  (let [[px py] (device state x y)]
+    (-> state (seg (str "M" (pt [px py]))) (extend-bounds [px py])
+        (assoc :point [px py] :subpath-start [px py]))))
+
+(defn- line-to [state x y]
+  (let [[px py] (device state x y)]
+    (-> state (seg (str "L" (pt [px py]))) (extend-bounds [px py])
+        (assoc :point [px py]))))
+
+(defn- curve-to-abs [state [c1x c1y] [c2x c2y] [ex ey]]
+  (-> state
+      (seg (str "C" (pt [c1x c1y]) " " (pt [c2x c2y]) " " (pt [ex ey])))
+      (extend-bounds [c1x c1y]) (extend-bounds [c2x c2y]) (extend-bounds [ex ey])
+      (assoc :point [ex ey])))
+
+(defn- curve-to [state nums]
+  (if (= 6 (count nums))
+    (let [[x1 y1 x2 y2 x3 y3] nums]
+      (curve-to-abs state (device state x1 y1) (device state x2 y2)
+                    (device state x3 y3)))
+    state))
+
+(defn- close-path [state]
+  (-> state (seg "Z") (assoc :point (:subpath-start state))))
+
+(defn- rect-path
+  "`re`, remembered both ways.
+
+  As path segments, so a rectangle can be part of a larger path — and as a
+  rectangle, so `re … f` on its own still becomes a `:rule`. A document that
+  draws one box per table cell is the common case, and a box is worth more
+  to a consumer than a closed four-segment path."
+  [state x y w h]
+  (let [[x0 y0] (device state x y)
+        [x1 y1] (device state (+ x w) (+ y h))]
+    (-> state
+        (seg (str "M" (pt [x0 y0]) " L" (pt [x1 y0]) " L" (pt [x1 y1])
+                  " L" (pt [x0 y1]) " Z"))
+        (extend-bounds [x0 y0]) (extend-bounds [x1 y1])
+        (assoc :point [x0 y0] :subpath-start [x0 y0])
+        (update :rects (fnil conj []) [(min x0 x1) (min y0 y1)
+                                       (Math/abs (- x1 x0)) (Math/abs (- y1 y0))]))))
+
+(def ^:private fills #{"f" "F" "f*" "b" "b*" "B" "B*"})
+(def ^:private strokes #{"S" "s" "b" "b*" "B" "B*"})
+
+(defn- ink-of [grey] (when (number? grey) (- 1.0 grey)))
+
+(defn- paint
+  "A painting operator: what the accumulated path becomes, and the state
+  with that path cleared.
+
+  A path made ONLY of rectangles becomes `:rule`s — one per rectangle, which
+  is what a table of boxes should be. Anything else becomes one `:path`,
+  because a curve's segments are not independently meaningful.
+
+  `n` paints nothing (it is there to end a clip), so it clears and emits
+  nothing. That is not a special case bolted on: every operator here clears,
+  and `n` is the one whose paint set is empty."
+  [state op]
+  (let [fill? (contains? fills op)
+        stroke? (contains? strokes op)
+        rects (:rects state)
+        segs (:path state)
+        only-rects? (and (seq rects)
+                         (= (count segs) (count rects)))
+        [bx0 by0 bx1 by1] (:bounds state)
+        cleared (dissoc state :path :rects :point :subpath-start :bounds)]
+    {:state cleared
+     :items*
+     (cond
+       (not (or fill? stroke?)) []
+
+       (and only-rects? fill?)
+       (mapv (fn [[x y w h]]
+               (page/rule-item {:x x :y y :width w :height h
+                                :ink (ink-of (:gray state))}))
+             rects)
+
+       (and (seq segs) bx0)
+       [(page/path-item {:d (str/join " " segs)
+                         :x bx0 :y by0
+                         :width (- bx1 bx0) :height (- by1 by0)
+                         :fill (when fill? (ink-of (:gray state)))
+                         :stroke (when stroke? (or (ink-of (:stroke-gray state))
+                                                   (ink-of (:gray state))))
+                         :stroke-width (when stroke? (:line-width state))})]
+
+       :else [])}))
+
 (defn- number-operands [stack]
   (into [] (comp (filter #(= :num (first %))) (map second)) stack))
 
@@ -641,23 +762,43 @@
                       (recur rest-tokens [] state'
                              (if item (conj! items item) items)))))
 
+                ;; ── path construction ────────────────────────────────
+                ;;
+                ;; Segments accumulate until a painting operator decides
+                ;; what to do with them. A rectangle is remembered as a
+                ;; rectangle as well, because `re … f` is most of what
+                ;; documents draw and a `:rule` is worth more downstream
+                ;; than a four-corner path.
+                "m" (let [[x y] (take-last 2 nums)]
+                      (recur rest-tokens [] (move-to state x y) items))
+                "l" (let [[x y] (take-last 2 nums)]
+                      (recur rest-tokens [] (line-to state x y) items))
+                "c" (recur rest-tokens [] (curve-to state (take-last 6 nums)) items)
+                ;; `v` and `y` are `c` with one control point implied — `v`
+                ;; repeats the current point and `y` repeats the endpoint.
+                ;; Treating either as a line is a curve drawn straight.
+                "v" (let [[x2 y2 x3 y3] (take-last 4 nums)
+                          [cx cy] (:point state)]
+                      (recur rest-tokens []
+                             (curve-to-abs state [cx cy] (device state x2 y2)
+                                           (device state x3 y3))
+                             items))
+                "y" (let [[x1 y1 x3 y3] (take-last 4 nums)
+                          end (device state x3 y3)]
+                      (recur rest-tokens []
+                             (curve-to-abs state (device state x1 y1) end end)
+                             items))
+                "h" (recur rest-tokens [] (close-path state) items)
+
                 "re" (if (= 4 (count (take-last 4 nums)))
                        (let [[x y w h] (take-last 4 nums)]
-                         (recur rest-tokens []
-                                (assoc state :pending-rect [x y w h]) items))
+                         (recur rest-tokens [] (rect-path state x y w h) items))
                        (recur rest-tokens [] state items))
 
-                ("f" "F" "f*" "b" "b*" "B" "B*")
-                (if-let [[x y w h] (:pending-rect state)]
-                  (let [[x0 y0] (apply-point (:ctm state) [x y])
-                        [x1 y1] (apply-point (:ctm state) [(+ x w) (+ y h)])
-                        item (page/rule-item {:x (min x0 x1) :y (min y0 y1)
-                                              :width (Math/abs (- x1 x0))
-                                              :height (Math/abs (- y1 y0))
-                                              :ink (when (number? (:gray state))
-                                                     (- 1.0 (:gray state)))})]
-                    (recur rest-tokens [] (dissoc state :pending-rect) (conj! items item)))
-                  (recur rest-tokens [] state items))
+                ;; ── painting ─────────────────────────────────────────────
+                ("f" "F" "f*" "b" "b*" "B" "B*" "S" "s" "n")
+                (let [{:keys [state items*]} (paint state value)]
+                  (recur rest-tokens [] state (reduce conj! items items*)))
 
                 ;; Every operator that sets a fill colour, not only the two
                 ;; easy ones. `g` and `rg` were tracked and `k`/`sc`/`scn`
@@ -667,9 +808,20 @@
                 ;; real poster: a pale panel behind a column came out as a
                 ;; solid block, in the one place looking at it was the only
                 ;; way to find out.
-                ("g" "G" "rg" "RG" "k" "K" "sc" "SC" "scn" "SCN")
+                ;; Lower case sets the FILL colour and upper case the
+                ;; STROKE colour. Treating them as one is how a hairline
+                ;; table border ends up the colour of the cell behind it.
+                ("g" "rg" "k" "sc" "scn")
                 (recur rest-tokens [] (assoc state :gray (fill-grey nums (:gray state)))
                        items)
+                ("G" "RG" "K" "SC" "SCN")
+                (recur rest-tokens []
+                       (assoc state :stroke-gray (fill-grey nums (:stroke-gray state)))
+                       items)
+                "w" (recur rest-tokens []
+                           (assoc state :line-width
+                                  (* (double (or (last nums) 1.0)) (y-scale (:ctm state))))
+                           items)
 
                 "Do" (recur rest-tokens [] state
                             (if-let [nm (last names)]

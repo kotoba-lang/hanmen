@@ -49,7 +49,7 @@
   "Every element this may emit. `foreignObject` is absent for the obvious
   reason and `style` for the less obvious one: a stylesheet in the fragment
   would be a second place styling is decided, and the host's is the only one."
-  #{"svg" "g" "rect" "text" "image" "title" "desc"})
+  #{"svg" "g" "rect" "text" "path" "image" "title" "desc"})
 
 (def allowed-attributes
   "Per element, so that `href` cannot appear on `text` by a typo or on `svg`
@@ -69,6 +69,11 @@
    "rect" #{"x" "y" "width" "height" "class" "fill-opacity"}
    "text" #{"x" "y" "class" "font-size" "textLength" "lengthAdjust"
             "fill-opacity" "xml:space"}
+   ;; `d` is path data — a closed grammar of letters and numbers with no
+   ;; way to name a resource. It is the one attribute here that carries
+   ;; document-derived content, and `hanmen.pdf` builds it from numbers it
+   ;; computed rather than from anything the file spelled.
+   "path" #{"d" "class" "fill-opacity" "stroke-opacity" "stroke-width"}
    "image" #{"x" "y" "width" "height" "class" "href" "preserveAspectRatio"}
    "title" #{}
    "desc" #{}})
@@ -89,23 +94,9 @@
       (str/replace "\"" "&quot;")
       (str/replace "'" "&apos;")))
 
-(defn- number->str
-  "`200` rather than `200.0`, and `1.235` rather than `1.2349999999`.
-
-  Not cosmetic at this scale: a page of two thousand marks carries the two
-  characters four times per mark, and every one of them is in a response
-  body. Rounding first and dropping an integral tail is also what makes two
-  runs byte-identical, which is what a digest over a rendering needs."
-  [n]
-  (let [r (page/round n 3)
-        truncated #?(:clj (Math/floor r) :cljs (js/Math.floor r))]
-    (if (== r truncated)
-      (str #?(:clj (long r) :cljs (js/Math.trunc r)))
-      (str r))))
-
 (defn- attr-value [v]
   (cond
-    (number? v) (number->str v)
+    (number? v) (page/num->str v)
     (keyword? v) (name v)
     :else (str v)))
 
@@ -230,6 +221,19 @@
              ;; that never issued a colour operator means.
              (number? ink) (assoc :fill-opacity ink))]
 
+    :path
+    (let [{:item/keys [d fill stroke stroke-width]} item]
+      [:path (cond-> {:d d :class (str "hanmen-path"
+                                       (when-not fill " hanmen-path--unfilled"))}
+               ;; Painted in `currentColor` like everything else, with the
+               ;; document's ink as opacity. A path with no fill needs to
+               ;; say so: SVG fills a path black by default, so a stroked
+               ;; outline would come out a solid shape.
+               (number? fill) (assoc :fill-opacity fill)
+               (number? stroke) (assoc :stroke-opacity stroke)
+               (number? stroke-width) (assoc :stroke-width
+                                             (max 0.1 stroke-width)))])
+
     :image (emit-image item image-href)
 
     :frame
@@ -257,7 +261,7 @@
                    (:scale opts)
                    1.0)]
      [:svg {:xmlns "http://www.w3.org/2000/svg"
-            :viewBox (str "0 0 " (number->str width) " " (number->str height))
+            :viewBox (str "0 0 " (page/num->str width) " " (page/num->str height))
             :width (* width scale)
             :height (* height scale)
             :class (str "hanmen-page" (when class-name (str " " class-name)))
@@ -297,6 +301,8 @@
        ;; own paper rather than against a hex somebody guessed.
        ".hanmen-text--reversed{fill:var(--hanmen-paper,canvas)}"
        ".hanmen-rule{fill:currentColor}"
+       ".hanmen-path{fill:currentColor;stroke:currentColor;stroke-opacity:0}"
+       ".hanmen-path--unfilled{fill:none}"
        ".hanmen-image{image-rendering:auto}"
        ".hanmen-frame__box{fill:none;stroke:currentColor;stroke-opacity:.35;"
        "stroke-dasharray:4 3;stroke-width:1}"))

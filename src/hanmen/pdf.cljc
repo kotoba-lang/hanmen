@@ -554,6 +554,41 @@
         (update :rects (fnil conj []) [(min x0 x1) (min y0 y1)
                                        (Math/abs (- x1 x0)) (Math/abs (- y1 y0))]))))
 
+(defn- intersect-box
+  "Two boxes, or the one that exists.
+
+  Nil is `everything`, not `nothing` — a page with no clip must not lose
+  every mark, and that is the direction this gets dangerously wrong."
+  [a b]
+  (cond
+    (nil? a) b
+    (nil? b) a
+    :else (let [[ax0 ay0 ax1 ay1] a [bx0 by0 bx1 by1] b]
+            [(max ax0 bx0) (max ay0 by0) (min ax1 bx1) (min ay1 by1)])))
+
+(defn- outside-box?
+  "Wholly outside — the same test the page boundary uses, and for the same
+  reason: a mark that straddles the edge is partly visible, and trimming it
+  needs geometry this does not do."
+  [[cx0 cy0 cx1 cy1] {:item/keys [x y width height]}]
+  (and (number? x)
+       (or (> x cx1) (> y cy1)
+           (and (number? width) (< (+ x width) cx0))
+           (and (number? height) (< (+ y height) cy0)))))
+
+(defn- remove-outside-clip
+  "Marks the clip cannot show.
+
+  A BOX and not the clip path itself, and the difference is worth naming: a
+  circular clip's box keeps the corners, so this shows a little more than
+  the document does. Showing slightly too much is a mark drawn where the
+  document drew nothing; showing too little is a mark MISSING, and a reader
+  cannot tell a missing mark from a document that never had one."
+  [clip items]
+  (if-not clip
+    items
+    (into [] (remove #(outside-box? clip %)) items)))
+
 (def ^:private fills #{"f" "F" "f*" "b" "b*" "B" "B*"})
 (def ^:private strokes #{"S" "s" "b" "b*" "B" "B*"})
 
@@ -573,15 +608,25 @@
   [state op]
   (let [fill? (contains? fills op)
         stroke? (contains? strokes op)
+        ;; The clip narrows on the way in and never widens: PDF intersects,
+        ;; so a `q`/`Q` pair is the only thing that puts it back. Tracked as
+        ;; a BOX rather than the path itself — see `clip-box`.
+        state (if (:pending-clip? state)
+                (-> state (dissoc :pending-clip?)
+                    (assoc :clip (intersect-box (:clip state) (:bounds state))))
+                state)
         rects (:rects state)
         segs (:path state)
         only-rects? (and (seq rects)
                          (= (count segs) (count rects)))
         [bx0 by0 bx1 by1] (:bounds state)
+        clip (:clip state)
         cleared (dissoc state :path :rects :point :subpath-start :bounds)]
     {:state cleared
      :items*
-     (cond
+     (remove-outside-clip
+      clip
+      (cond
        (not (or fill? stroke?)) []
 
        (and only-rects? fill?)
@@ -599,7 +644,7 @@
                                                    (ink-of (:gray state))))
                          :stroke-width (when stroke? (:line-width state))})]
 
-       :else [])}))
+       :else []))}))
 
 (defn- number-operands [stack]
   (into [] (comp (filter #(= :num (first %))) (map second)) stack))
@@ -715,12 +760,34 @@
                   place (fn [state chars]
                           (let [{:keys [advance item]} (run-of state chars)]
                             [(update state :tm #(mul (translation advance 0.0) %))
-                             item]))]
+                             ;; Clipped like everything else. A heading
+                             ;; scrolled out of a clipped box is text the
+                             ;; document does not show, and showing it puts
+                             ;; a stray line across the page.
+                             (when (and item (not (and (:clip state)
+                                                       (outside-box? (:clip state) item))))
+                               item)]))]
               (case value
-                "q" (recur rest-tokens [] (update state :gs conj (select-keys state [:ctm :gray])) items)
+                ;; The whole graphics state, not just the matrix. Colour,
+                ;; line width and the CLIP are all part of it — a `Q` that
+                ;; restored the matrix and left the clip would keep a
+                ;; narrowed clip for the rest of the page, and every mark
+                ;; after it would silently vanish.
+                "q" (recur rest-tokens []
+                           (update state :gs conj
+                                   (select-keys state [:ctm :gray :stroke-gray
+                                                       :line-width :clip]))
+                           items)
                 "Q" (let [top (peek (:gs state))]
                       (recur rest-tokens []
-                             (-> state (update :gs pop) (merge (or top {})))
+                             (-> state
+                                 (update :gs pop)
+                                 ;; Dissoc first: `merge` cannot restore a
+                                 ;; key to ABSENT, so a clip set inside the
+                                 ;; q/Q pair would survive a restore that
+                                 ;; had none.
+                                 (dissoc :clip :stroke-gray :line-width)
+                                 (merge (or top {})))
                              items))
                 "cm" (recur rest-tokens []
                             (cond-> state
@@ -831,6 +898,12 @@
                          (recur rest-tokens [] (rect-path state x y w h) items))
                        (recur rest-tokens [] state items))
 
+                ;; `W` marks the CURRENT path as the next clip. It does not
+                ;; take effect until the painting operator that follows,
+                ;; which is why it is a flag and not an assignment — `W n`
+                ;; is the idiom, and `n` is where the path is consumed.
+                ("W" "W*") (recur rest-tokens [] (assoc state :pending-clip? true) items)
+
                 ;; ── painting ─────────────────────────────────────────────
                 ("f" "F" "f*" "b" "b*" "B" "B*" "S" "s" "n")
                 (let [{:keys [state items*]} (paint state value)]
@@ -862,7 +935,9 @@
                 "Do" (recur rest-tokens [] state
                             (if-let [nm (last names)]
                               (reduce conj! items
-                                      (do-xobject objs state nm depth seen images))
+                                      (remove-outside-clip
+                                       (:clip state)
+                                       (do-xobject objs state nm depth seen images)))
                               items))
 
                 ;; Everything else — paths, clipping, colour spaces, marked

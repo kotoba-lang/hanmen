@@ -96,6 +96,24 @@ Fill and stroke carry separate ink, because lower-case colour operators set
 one and upper-case the other — treating them as one is how a hairline table
 border ends up the colour of the cell behind it.
 
+## The clip is honoured, as a box
+
+`W n` marks the current path as the clip and ends it without painting. A
+reader that ignored it draws what the document hides — a caption from under
+a cropped figure, a row from a table that was scrolled. Measured across 47
+documents: **112 text runs the document does not show**.
+
+Tracked as a bounding box rather than the path, and the direction of that
+error is chosen: a circular clip's box keeps the corners, so this shows a
+little more than the document does. Showing slightly too much is a mark
+drawn where the document drew nothing; showing too little is a mark
+**missing**, and a reader cannot tell a missing mark from a document that
+never had one.
+
+The clip is part of the graphics state, so `q`/`Q` save and restore it —
+including restoring it to *absent*, which `merge` alone cannot do and which
+would otherwise leave a narrowed clip swallowing the rest of the page.
+
 ## Ink, and text that is knocked out of it
 
 Every fill-colour operator records ink — `g`, `rg`, `k`, and the
@@ -205,7 +223,7 @@ clojure -M:test         # pinned git deps
 clojure -M:lint
 ```
 
-61 tests / 213 assertions. Every placement assertion is a coordinate against a
+63 tests / 218 assertions. Every placement assertion is a coordinate against a
 PDF the test wrote, not a rendering somebody looked at.
 
 Measured out of sample against 30 real PDFs: 12,584 text runs, 2,083 rules, 57

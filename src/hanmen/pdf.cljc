@@ -271,6 +271,50 @@
      chars
      (map second (re-seq #"(?s)beginbfrange(.*?)endbfrange" cmap)))))
 
+(defn- composite-widths
+  "A `/Type0` font's glyph widths, from its descendant's `/W` and `/DW`.
+
+  Composite fonts do not use `/Widths` — that is the simple-font key, and
+  looking only there leaves every CJK and every subset-CFF font with no
+  measured advance at all. The effect is not subtle: the pen then moves by
+  `default-width` per glyph, so consecutive glyphs of one word land far
+  apart, `coalesce` sees them as separate runs, and a page comes out one
+  letter at a time. Measured on a real cover page, where it looked like a
+  gap problem and was an advance problem.
+
+  `/W` is `[c [w …] | cfirst clast w]`, mixed in one array. `/DW` is the
+  default for anything the array does not mention, and 1000 when absent —
+  which is the spec's default and also why a missing `/DW` is not a reason
+  to fall back to this library's own."
+  [objs font-dict]
+  (let [desc (pdf/resolve-ref objs (first (pdf/resolve-ref
+                                           objs (:DescendantFonts font-dict))))
+        w (mapv #(pdf/resolve-ref objs %) (pdf/resolve-ref objs (:W desc)))
+        dw (double (or (pdf/resolve-ref objs (:DW desc)) 1000))]
+    (when (or (seq w) (:DW desc))
+      (with-meta
+        (loop [i 0 acc {}]
+          (cond
+            (>= i (count w)) acc
+            ;; `c [w …]` — consecutive codes from c.
+            (vector? (nth w (inc i) nil))
+            (recur (+ i 2)
+                   (into acc (map-indexed
+                              (fn [k width]
+                                [(+ (long (nth w i)) k)
+                                 (double (pdf/resolve-ref objs width))])
+                              (nth w (inc i)))))
+            ;; `cfirst clast w` — one width for the whole range.
+            (and (number? (nth w (inc i) nil)) (number? (nth w (+ i 2) nil)))
+            (let [lo (long (nth w i)) hi (long (nth w (inc i)))
+                  width (double (nth w (+ i 2)))]
+              (recur (+ i 3)
+                     (if (> (- hi lo) 0xFFFF)
+                       acc
+                       (into acc (map (fn [c] [c width])) (range lo (inc hi))))))
+            :else (recur (inc i) acc)))
+        {:default dw}))))
+
 (defn font-table
   "The page's `/Resources /Font`, as name → what a run needs to know.
 
@@ -357,14 +401,20 @@
                                                                   objs (:FontFile3 desc))))
                                                 :fontfile3)
                                             :else :none)))
-                            :widths (when (and (number? first-char) (vector? widths))
+                            :widths (or
+                                     ;; Composite first: a `/Type0` font has
+                                     ;; no `/Widths`, and the simple-font
+                                     ;; branch would silently find nothing.
+                                     (when (= subtype :Type0)
+                                       (composite-widths objs fd))
+                                     (when (and (number? first-char) (vector? widths))
                                       (into {}
                                             (keep-indexed
                                              (fn [i w]
                                                (let [w (pdf/resolve-ref objs w)]
                                                  (when (number? w)
                                                    [(+ (long first-char) i) (double w)]))))
-                                            widths))}]))))
+                                            widths)))}]))))
                   fonts))))))
 
 (def ^:private default-width
@@ -452,7 +502,8 @@
              ;; layer of a scanned page, so it is kept — dropping it would
              ;; make exactly the documents that most need search unsearchable.
              (and (or composite? (some? enc)) (empty? text) (seq codes))
-             (page/frame-item {:x x :y (- y drawn-size) :width (* advance (y-scale ctm))
+             (page/frame-item {:x x :y (- y drawn-size)
+                               :width (* advance (y-scale (mul tm ctm)))
                                :height drawn-size
                                :label (str (or (:base-font fd) "text")
                                            (when (or (:ordering fd) (:embedded fd))
@@ -470,7 +521,19 @@
              (-> (page/text-item
                   {:x x :y y :size drawn-size :text text
                    :font (:base-font fd)
-                   :width (when widths (* advance (y-scale ctm)))
+                   ;; Through `tm × ctm`, not `ctm` alone. The advance is in
+               ;; TEXT space and the text matrix is what scales it — a
+               ;; producer that sets `Tf 1` and sizes with `Tm`, which is
+               ;; extremely common, otherwise gets a width a full font size
+               ;; too small. Measured: 0.61 where the glyph advanced 14.90,
+               ;; so every run looked separated from the next and a page
+               ;; came out one letter at a time.
+               ;;
+               ;; `drawn-size` already went through both. Two numbers from
+               ;; the same run disagreeing about which matrices apply is the
+               ;; shape of this bug, and the reason they are computed next
+               ;; to each other now.
+               :width (when widths (* advance (y-scale (mul tm ctm))))
                    ;; Nil when no colour operator has run, which per the
                    ;; spec means black — `hanmen.svg` reads an absent ink
                    ;; as full.
@@ -481,7 +544,11 @@
                  ;; number the next run has to start at to be the same word.
                  ;; Carrying it beats re-deriving it downstream from a width
                  ;; that is often absent on purpose.
-                 (assoc ::end-x (page/round (+ x (* advance (y-scale ctm))))
+                 ;; The same `tm × ctm` the width goes through. These two
+                 ;; are the same number by different names, and having them
+                 ;; disagree is what made a corrected width change nothing —
+                 ;; the join reads THIS one.
+                 (assoc ::end-x (page/round (+ x (* advance (y-scale (mul tm ctm)))))
                         ::size-hint (page/round drawn-size))))}))
 
 (defn- flip
@@ -1104,24 +1171,27 @@
                 (recur rest-tokens [] state items)))))
         (persistent! items))))
 
-(def ^:private space-fraction
-  "A gap this wide, as a fraction of the type size, is a word space.
+(def ^:private flush-fraction
+  "How much slack counts as *flush*, as a fraction of the type size.
 
-  Below it the two runs are halves of one word — a producer that emits one
-  `Tj` per glyph leaves gaps of exactly the advance, which rounds to nothing.
-  Too low and every space disappears; too high and words run together, and
-  the first failure is the silent one because the text still looks like
-  text."
-  0.18)
+  Only flush runs join, and **no space is ever inserted**. That is a
+  reversal, and the measurement that caused it is worth keeping: on a real
+  cover page the gaps between consecutive glyphs formed one continuous
+  spread from 0.30 to 0.90 em with no gap in the histogram anywhere. There
+  is no threshold on that page that separates letter-spacing from a word
+  space — every choice invents characters somewhere, and the first version
+  of this put one between every pair of letters
+  (`F o r m  a l V e r i f i c a t i o n`).
 
-(def ^:private join-fraction
-  "A gap wider than this ends the run instead of spacing it.
-
-  0.6 em. What it is protecting is the case a coalescer gets wrong loudly: a
-  two-column line whose halves share a baseline, and a tab stop that is there
-  to make a gap. Real column gutters are several em, so this sits well below
-  them and well above a word space."
-  0.6)
+  Inventing a space is exactly the mistake this library refuses elsewhere:
+  a guess that is indistinguishable from a measurement once it is in the
+  output, and one that goes into `text-of` and into anything quoting the
+  page. So runs that the producer placed apart stay apart, at their own
+  coordinates, which is what the document actually says. A caller that wants
+  a line joins them — `reading-text` does, with a space, and that is a
+  presentation choice made at the edge rather than a character smuggled into
+  the model."
+  0.05)
 
 (defn coalesce
   "Consecutive text runs that are one word, joined into one.
@@ -1148,6 +1218,13 @@
   a single sentence, and it is the failure that would be loud — the other
   direction, losing every space, still looks like text.
 
+  **Both of the wider two need a MEASURED advance.** When the font shipped
+  no `/Widths` the pen position is computed from `default-width`, and a gap
+  derived from a guess is not evidence of anything: the real glyph is often
+  wider, so the gap appears inside a word. Measured on a real cover page,
+  where it produced `Form alVerification of |penZeppelin`. Unmeasured runs
+  therefore join only when they are flush, and never gain a space.
+
   ## Joined only when they are exactly contiguous
 
   The pen's end position is known (`::end-x`, from the advance), so this is
@@ -1170,13 +1247,10 @@
                  (::end-x a)
                  (let [gap (- (:item/x b) (::end-x a))]
                    (and (>= gap -0.5)
-                        (< gap (* join-fraction (or (::size-hint a) 0.0)))))))
-          (spaced? [a b]
-            (let [gap (- (:item/x b) (::end-x a))]
-              (>= gap (* space-fraction (or (::size-hint a) 0.0)))))
+                        (< gap (* flush-fraction (or (::size-hint a) 0.0)))))))
           (join [a b]
             (-> a
-                (update :item/text str (when (spaced? a b) " ") (:item/text b))
+                (update :item/text str (:item/text b))
                 (assoc ::end-x (::end-x b))
                 ;; The joined run's measured width is the distance the pen
                 ;; actually travelled, which is only knowable when both

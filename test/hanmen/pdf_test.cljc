@@ -96,10 +96,10 @@
     (is (= ["Hello"] (page/text-of p)))
     (is (= 1 (count (texts p)))))
 
-  (testing "a gap wide enough to be a space becomes one"
+  (testing "a gap never becomes a space — see `no-space-is-ever-invented-between-runs`"
     (let [p (page-of (str "BT /F1 10 Tf 1 0 0 1 0 700 Tm (Hi) Tj "
                           "1 0 0 1 14 700 Tm (there) Tj ET"))]
-      (is (= ["Hi there"] (page/text-of p)))))
+      (is (= ["Hi" "there"] (page/text-of p)))))
 
   (testing "and a different size is a different piece of type"
     (let [p (page-of (str "BT /F1 10 Tf 1 0 0 1 0 700 Tm (a) Tj "
@@ -289,6 +289,55 @@
            (select-keys (hpdf/parse-tounicode
                          "beginbfrange\n<0041> <0042> [<0041> <005A>]\nendbfrange")
                         [0x41 0x42])))))
+
+(defn- measured-doc
+  "A page whose font ships `/Widths`, so the advance is a measurement.
+
+  500/1000 for every code, which is also `default-width` — chosen so the
+  geometry is identical to the unmeasured case and the ONLY difference under
+  test is whether the width was declared."
+  [content]
+  (let [text (str "%PDF-1.4\n"
+                  "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+                  "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+                  "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 800] "
+                  "/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n"
+                  "4 0 obj\n<< /Length 90 >>\nstream\n" content "\nendstream\nendobj\n"
+                  "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+                  "/FirstChar 32 /LastChar 126 /Widths ["
+                  (clojure.string/join " " (repeat 95 "500")) "] >>\nendobj\n"
+                  "trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n")]
+    (pdf/parse (mapv #(bit-and (int %) 0xff)
+                     #?(:clj (.getBytes ^String text "ISO-8859-1")
+                        :cljs (map #(.charCodeAt text %) (range (count text))))))))
+
+(deftest no-space-is-ever-invented-between-runs
+  ;; A reversal, and the measurement that caused it is the point: on a real
+  ;; cover page the gaps between consecutive glyphs formed one continuous
+  ;; spread from 0.30 to 0.90 em with no break anywhere. No threshold on
+  ;; that page separates letter-spacing from a word space, and the first
+  ;; version put a space between every pair of letters.
+  ;;
+  ;; So runs the producer placed apart stay apart, at their own coordinates,
+  ;; which is what the document says. Joining them is the caller's choice.
+  (let [p (hpdf/page-at (measured-doc (str "BT /F1 10 Tf 1 0 0 1 0 700 Tm (Hi) Tj "
+                                           "1 0 0 1 14 700 Tm (there) Tj ET")) 0)]
+    (is (= ["Hi" "there"] (page/text-of p))
+        "two runs, not one with a character nobody wrote")
+    (is (= "Hi there" (page/reading-text p))
+        "and joining them is a presentation choice made at the edge"))
+
+  (testing "flush runs still join, because that is not a guess"
+    (let [p (hpdf/page-at (measured-doc (str "BT /F1 10 Tf 1 0 0 1 0 700 Tm "
+                                             "(He) Tj (llo) Tj ET")) 0)]
+      (is (= ["Hello"] (page/text-of p)))))
+
+  (testing "and an unmeasured font joins on the same rule"
+    ;; `write-document` ships no /Widths, so the advance is `default-width`.
+    ;; Flush is flush either way — what changed is that nothing downstream
+    ;; depends on the gap MEANING anything.
+    (let [p (page-of "BT /F1 10 Tf 1 0 0 1 0 700 Tm (H) Tj (i) Tj ET")]
+      (is (= ["Hi"] (page/text-of p))))))
 
 (deftest a-predefined-encoding-splits-its-own-codes
   ;; `90ms-RKSJ-H` is Shift-JIS: one byte or two, declared in the CMap. A

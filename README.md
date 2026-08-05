@@ -258,7 +258,7 @@ clojure -M:test         # pinned git deps
 clojure -M:lint
 ```
 
-68 tests / 237 assertions. Every placement assertion is a coordinate against a
+69 tests / 240 assertions. Every placement assertion is a coordinate against a
 PDF the test wrote, not a rendering somebody looked at.
 
 Measured out of sample against 30 real PDFs: 12,584 text runs, 2,083 rules, 57

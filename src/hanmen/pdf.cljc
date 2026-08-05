@@ -284,7 +284,8 @@
   one. `:composite?` and `:to-unicode` decide whether a `/Type0` run can be
   read at all."
   ([objs page-dict] (font-table objs page-dict nil))
-  ([objs page-dict cid->unicode]
+  ([objs page-dict cid->unicode] (font-table objs page-dict cid->unicode nil))
+  ([objs page-dict cid->unicode encoding->cmap]
    (let [res (pdf/resolve-ref objs (:Resources page-dict))
         fonts (pdf/resolve-ref objs (:Font res))]
     (when (map? fonts)
@@ -326,6 +327,19 @@
                             ;; every font that uses the collection properly
                             ;; and wrong for one that subsets it privately —
                             ;; so it is the fallback and never the override.
+                            ;; A predefined encoding's codes are not CIDs
+                            ;; and are not all the same width — `90ms-RKSJ-H`
+                            ;; is Shift-JIS, one byte or two, declared in the
+                            ;; CMap itself. The resolver returns BOTH halves,
+                            ;; `{:split fn :text map}`, because the widths
+                            ;; are data in a file this library does not read:
+                            ;; taking only the table and splitting here would
+                            ;; be this namespace guessing at Shift-JIS.
+                            :encoding-cmap (when (and encoding->cmap
+                                                      (keyword? (:Encoding fd))
+                                                      (not (contains? #{:Identity-H :Identity-V}
+                                                                      (:Encoding fd))))
+                                             (encoding->cmap (name (:Encoding fd))))
                             :to-unicode (or tu-map
                                             (when (and cid->unicode ordering)
                                               (cid->unicode ordering)))
@@ -370,11 +384,16 @@
   every producer uses for CJK; a font with a different CMap will come out
   wrong, and it comes out as `:frame` rather than as text because the
   `/ToUnicode` lookup misses."
-  [chars composite?]
-  (if composite?
-    (mapv (fn [[hi lo]] (+ (* 256 (int hi)) (int (or lo (char 0)))))
-          (partition 2 2 nil chars))
-    (mapv int chars)))
+  ([chars composite?] (codes-of chars composite? nil))
+  ([chars composite? split]
+   (cond
+     ;; The encoding says how wide its codes are, so this does not have to
+     ;; assume. Assuming two splits every ASCII character in a Shift-JIS
+     ;; string in half.
+     split (split (mapv int chars))
+     composite? (mapv (fn [[hi lo]] (+ (* 256 (int hi)) (int (or lo (char 0)))))
+                      (partition 2 2 nil chars))
+     :else (mapv int chars))))
 
 ;; ── the walk ─────────────────────────────────────────────────────────────────
 
@@ -402,12 +421,17 @@
   (let [{:keys [font size char-spacing word-spacing horizontal rise render-mode]} text-state
         fd (get fonts font)
         composite? (boolean (:composite? fd))
-        codes (codes-of chars composite?)
+        enc (:encoding-cmap fd)
+        codes (codes-of chars (or composite? (some? enc)) (:split enc))
         widths (:widths fd)
         tu (:to-unicode fd)
-        text (if composite?
-               (apply str (keep #(get tu %) codes))
-               (apply str (map char codes)))
+        enc-text (:text enc)
+        text (cond
+               ;; The encoding's own table: code straight to characters,
+               ;; no CID in between.
+               enc-text (apply str (keep #(get enc-text %) codes))
+               composite? (apply str (keep #(get tu %) codes))
+               :else (apply str (map char codes)))
         ;; Advance in *text space*, before Tm/CTM. Word spacing applies to
         ;; single-byte code 32 only — applying it to a composite font's
         ;; two-byte code that happens to contain 32 is a classic drift.
@@ -427,7 +451,7 @@
              ;; the page image so the text is selectable. It IS the text
              ;; layer of a scanned page, so it is kept — dropping it would
              ;; make exactly the documents that most need search unsearchable.
-             (and composite? (empty? text) (seq codes))
+             (and (or composite? (some? enc)) (empty? text) (seq codes))
              (page/frame-item {:x x :y (- y drawn-size) :width (* advance (y-scale ctm))
                                :height drawn-size
                                :label (str (or (:base-font fd) "text")
@@ -1183,7 +1207,7 @@
   The page's own `/Resources` seed the state; a form XObject reached from here
   gets its own, merged over these — see `do-xobject`."
   ([objs page-dict] (walk objs page-dict nil))
-  ([objs page-dict {:keys [cid->unicode]}]
+  ([objs page-dict {:keys [cid->unicode encoding->cmap]}]
   (let [rotation (or (pdf/resolve-ref objs (:Rotate page-dict)) 0)
         {base :matrix :keys [width height]} (flip (media-box objs page-dict) rotation)
         res (resources-of objs page-dict)
@@ -1199,7 +1223,7 @@
                 ;; every constant alpha set before the first colour — which
                 ;; is most of them, because `gs` usually comes first.
                 :gray 0.0 :stroke-gray 0.0
-                :fonts (or (font-table objs page-dict cid->unicode) {})
+                :fonts (or (font-table objs page-dict cid->unicode encoding->cmap) {})
                 :xobjects (or (pdf/resolve-ref objs (:XObject res)) {})
                 ;; Kept so `gs` and `scn` can reach /ExtGState and /Pattern,
                 ;; which live in the resources rather than the stream.
@@ -1234,9 +1258,10 @@
 (defn page-at
   "Page `index` of `parsed`, as a `hanmen.page` value.
 
-  `opts` may carry `:cid->unicode` — see `font-table`. Without it a composite
-  font with no `/ToUnicode` stays a `:frame`, which is what this did before
-  the option existed."
+  `opts` may carry `:cid->unicode` and `:encoding->cmap` — see `font-table`.
+  Without them a composite font with no `/ToUnicode`, and a font using a
+  predefined encoding, both stay `:frame`s: which is what this did before
+  the options existed."
   ([parsed index] (page-at parsed index nil))
   ([parsed index opts]
   (let [objs (:objects parsed)

@@ -242,6 +242,154 @@
     (is (= "KozMin" (:item/label f)))
     (is (page/scanned? p) "and the page says a search cannot see it")))
 
+;; ── XObjects ─────────────────────────────────────────────────────────────────
+
+(defn- xobject-doc
+  "A one-page PDF whose page invokes `/X1`, with `X1` as the given object.
+
+  Hand-written for the same reason the composite-font fixture is:
+  `write-document` emits one font and no XObjects."
+  [page-content x1-body & [extra]]
+  (let [text (str "%PDF-1.4\n"
+                  "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+                  "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+                  "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] "
+                  "/Resources << /Font << /F1 7 0 R >> /XObject << /X1 5 0 R >> >> "
+                  "/Contents 4 0 R >>\nendobj\n"
+                  "4 0 obj\n<< /Length 99 >>\nstream\n" page-content
+                  "\nendstream\nendobj\n"
+                  "5 0 obj\n" x1-body "\nendobj\n"
+                  "7 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+                  (or extra "")
+                  "trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n")]
+    (pdf/parse (mapv #(bit-and (int %) 0xff)
+                     #?(:clj (.getBytes ^String text "ISO-8859-1")
+                        :cljs (map #(.charCodeAt text %) (range (count text))))))))
+
+(deftest a-form-xobject-is-run-not-outlined
+  ;; The gap this closed: a figure drawn as form XObjects came out as a page
+  ;; of dashed boxes. Measured before it was written — one figure in the
+  ;; sample produced 1,415 of them where the drawing was.
+  (let [p (hpdf/page-at
+           (xobject-doc "q 1 0 0 1 0 0 cm /X1 Do Q"
+                        (str "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] "
+                             "/Resources << /Font << /F1 7 0 R >> >> /Length 60 >>\n"
+                             "stream\nBT /F1 10 Tf 1 0 0 1 20 60 Tm (inside the form) Tj ET\n"
+                             "endstream"))
+           0)
+        [t] (texts p)]
+    (is (= 1 (count (texts p))) "the form's text, not a box")
+    (is (= "inside the form" (:item/text t)))
+    (is (= 20.0 (:item/x t)))
+    (is (= 40.0 (:item/y t)) "100 − 60")
+    (is (empty? (filter #(= :frame (:item/kind %)) (:page/items p))))))
+
+(deftest a-form-s-matrix-and-the-invoking-ctm-both-apply
+  ;; Two transforms compose here and getting either one wrong still draws
+  ;; SOMETHING, which is why this asserts the coordinate rather than the count.
+  (let [p (hpdf/page-at
+           (xobject-doc "q 1 0 0 1 100 0 cm /X1 Do Q"
+                        (str "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] "
+                             "/Matrix [1 0 0 1 10 20] "
+                             "/Resources << /Font << /F1 7 0 R >> >> /Length 50 >>\n"
+                             "stream\nBT /F1 10 Tf 1 0 0 1 0 0 Tm (m) Tj ET\n"
+                             "endstream"))
+           0)
+        [t] (texts p)]
+    (is (= 110.0 (:item/x t)) "0 + form matrix 10 + invoking cm 100")
+    (is (= 80.0 (:item/y t)) "100 − (0 + 20)")))
+
+(deftest a-form-inherits-the-page-s-resources-when-it-declares-none
+  ;; A form that names /F1 without declaring it means the page's /F1. A
+  ;; reader that only looked in the form would place the text at size zero.
+  (let [p (hpdf/page-at
+           (xobject-doc "/X1 Do"
+                        (str "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] "
+                             "/Length 50 >>\n"
+                             "stream\nBT /F1 10 Tf 1 0 0 1 5 50 Tm (borrowed) Tj ET\n"
+                             "endstream"))
+           0)
+        [t] (texts p)]
+    (is (= "borrowed" (:item/text t)))
+    (is (= 10.0 (:item/size t)) "the page's /F1, not a missing font at size 0")))
+
+(deftest a-form-that-invokes-itself-stops-and-says-where
+  ;; A template that includes itself is an infinite content stream, and it
+  ;; does not take malice to emit one.
+  (let [p (hpdf/page-at
+           (xobject-doc "/X1 Do"
+                        (str "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] "
+                             "/Resources << /XObject << /X1 5 0 R >> >> /Length 30 >>\n"
+                             "stream\n/X1 Do\nendstream"))
+           0)
+        frames (filter #(= :frame (:item/kind %)) (:page/items p))]
+    (is (= 1 (count frames)) "one frame at the point it stopped, not a hang")
+    (is (= :form/too-deep (:item/reason (first frames))))))
+
+(deftest an-image-xobject-is-placed-with-an-index-and-never-its-name
+  ;; The name is file content and would become part of a URL. An integer
+  ;; cannot carry anything a document wrote.
+  (let [p (hpdf/page-at
+           (xobject-doc "q 50 0 0 25 10 60 cm /X1 Do Q"
+                        (str "<< /Type /XObject /Subtype /Image /Width 4 /Height 4 "
+                             "/BitsPerComponent 8 /ColorSpace /DeviceRGB "
+                             "/Filter /DCTDecode /Length 4 >>\nstream\nJPEG\nendstream"))
+           0)
+        [img] (filter #(= :image (:item/kind %)) (:page/items p))]
+    (is (some? img))
+    (is (= 0 (:item/index img)))
+    (is (nil? (:item/label img)) "no name anywhere on the item")
+    (testing "DCTDecode bytes ARE a JPEG, so a host can serve them undecoded"
+      (is (= "image/jpeg" (:item/media-type img))))
+    (testing "placed where the CTM put it"
+      (is (= 10.0 (:item/x img)))
+      (is (= 15.0 (:item/y img)) "100 − (60 + 25)")
+      (is (= 50.0 (:item/width img)))
+      (is (= 25.0 (:item/height img))))))
+
+(deftest raw-samples-carry-no-media-type-because-somebody-must-encode-them
+  (let [p (hpdf/page-at
+           (xobject-doc "q 10 0 0 10 0 0 cm /X1 Do Q"
+                        (str "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 "
+                             "/BitsPerComponent 8 /ColorSpace /DeviceGray "
+                             "/Filter /FlateDecode /Length 4 >>\nstream\nRAWX\nendstream"))
+           0)
+        [img] (filter #(= :image (:item/kind %)) (:page/items p))]
+    (is (some? img))
+    (is (nil? (:item/media-type img))
+        "a guessed type arrives at a browser as a broken image")))
+
+(deftest page-images-are-in-the-order-the-index-counts-in
+  ;; The invariant a host depends on. Reading the page's /XObject dictionary
+  ;; instead gives RESOURCE order, and the two agree only on a document that
+  ;; never invokes a form — so a host that mixed them would serve the wrong
+  ;; picture for the right box, on exactly the documents whose pictures
+  ;; matter. One traversal defines both, here.
+  (let [parsed (xobject-doc
+                ;; The form is invoked FIRST, so its image is index 0 even
+                ;; though /X1 is the page's own resource.
+                "q 10 0 0 10 0 0 cm /X2 Do Q q 10 0 0 10 50 0 cm /X1 Do Q"
+                (str "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 "
+                     "/BitsPerComponent 8 /ColorSpace /DeviceGray "
+                     "/Filter /DCTDecode /Length 4 >>\nstream\nPAGE\nendstream")
+                (str "6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] "
+                     "/Resources << /XObject << /X9 8 0 R >> >> /Length 20 >>\n"
+                     "stream\n/X9 Do\nendstream\nendobj\n"
+                     "8 0 obj\n<< /Type /XObject /Subtype /Image /Width 1 /Height 1 "
+                     "/BitsPerComponent 8 /ColorSpace /DeviceGray "
+                     "/Filter /FlateDecode /Length 4 >>\nstream\nFORM\nendstream\nendobj\n"))
+        ;; /X2 has to resolve to the form; the fixture's page resources name
+        ;; /X1 only, so this asserts on what the walker actually reached.
+        p (hpdf/page-at parsed 0)
+        imgs (filterv #(= :image (:item/kind %)) (:page/items p))
+        listed (hpdf/page-images parsed 0)]
+    (is (= (count imgs) (count listed))
+        "one entry per placed image, not per resource")
+    (is (= (mapv :item/index imgs) (vec (range (count imgs)))))
+    (doseq [{:item/keys [index media-type]} imgs]
+      (is (= media-type (:media-type (nth listed index)))
+          "the item and the bytes agree about what they are"))))
+
 ;; ── documents ────────────────────────────────────────────────────────────────
 
 (deftest a-document-is-its-pages-in-order

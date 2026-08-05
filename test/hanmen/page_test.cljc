@@ -57,6 +57,51 @@
     (is (page/matches? p ""))
     (is (not (page/matches? p "termination")))))
 
+(defn- run [x y text & [w]]
+  (page/text-item (cond-> {:x x :y y :size 10 :text text} w (assoc :width w))))
+
+(deftest reading-order-is-a-guess-and-text-of-is-a-fact
+  ;; Kept apart deliberately. `text-of` is what the document says in the
+  ;; order it said it; this is a guess about how to read it, and a caller
+  ;; that needs the fact should not have to opt out of the guess.
+  (let [p (page/page {:width 100 :height 100
+                      :items [(run 10 30 "second") (run 10 10 "first")]})]
+    (is (= ["second" "first"] (page/text-of p)) "content-stream order, unchanged")
+    (is (= ["first" "second"] (mapv :item/text (page/reading-order p))))))
+
+(deftest a-superscript-does-not-jump-the-word-it-belongs-to
+  ;; Two runs on one baseline rarely have exactly equal y. Sorting on raw y
+  ;; puts the superscript first, which is not where anybody reads it.
+  (let [p (page/page {:width 100 :height 100
+                      :items [(run 40 19.4 "1") (run 10 20 "footnote")]})]
+    (is (= ["footnote" "1"] (mapv :item/text (page/reading-order p))))))
+
+(deftest two-columns-are-read-down-and-then-across
+  ;; The failure content-stream order produces on a paper: the columns
+  ;; interleave, and a quotation comes out as alternating half-sentences.
+  (let [left (for [i (range 8)] (run 10 (+ 10 (* i 10)) (str "L" i) 30))
+        right (for [i (range 8)] (run 210 (+ 10 (* i 10)) (str "R" i) 30))
+        ;; Emitted interleaved, as a two-column producer often does.
+        p (page/page {:width 400 :height 100
+                      :items (vec (mapcat vector left right))})]
+    (is (= (concat (map #(str "L" %) (range 8)) (map #(str "R" %) (range 8)))
+           (mapv :item/text (page/reading-order p))))))
+
+(deftest a-page-wide-title-does-not-make-a-page-two-columns
+  ;; A straddling run is what tells them apart, which is why the test is on
+  ;; the share of straddlers rather than on there being none.
+  (let [body (for [i (range 14)] (run 10 (+ 20 (* i 5)) (str "b" i) 380))
+        p (page/page {:width 400 :height 100
+                      :items (vec (cons (run 10 10 "TITLE" 380) body))})]
+    (is (= "TITLE" (:item/text (first (page/reading-order p)))))
+    (is (= (map #(str "b" %) (range 14))
+           (map :item/text (rest (page/reading-order p)))))))
+
+(deftest reading-text-joins-what-the-producer-broke
+  (let [p (page/page {:width 100 :height 100
+                      :items [(run 40 10 "Agreement") (run 10 10 "Master")]})]
+    (is (= "Master Agreement" (page/reading-text p)))))
+
 (deftest a-document-reports-which-pages-a-search-cannot-see
   (let [d (page/document
            [(page/page {:index 0 :width 10 :height 10

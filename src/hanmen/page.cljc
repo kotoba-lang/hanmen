@@ -48,12 +48,18 @@
   here without a case there is a mark that silently disappears — which is why
   `hanmen.svg/emit-item` throws on an unknown kind rather than skipping it.
 
-  `:frame` is the honest one. An image, a form XObject or a shading is a
-  region of the page whose *contents* this does not decode, and a viewer that
-  drew nothing there would show a page that looks complete and is not. So the
-  region is placed, named and marked as undrawn, and the drawer decides
-  whether to outline it. Silence is the one thing it must not be."
-  #{:text :rule :frame})
+  `:image` is a region whose pixels exist and are NOT in this value. It
+  carries the index of the image on its page, never its name: a name comes out
+  of the file, and an index cannot carry anything a document wrote. A drawer
+  that has somewhere to fetch pixels from can draw it; one that has not falls
+  back to outlining the region, which is what `hanmen.svg` does by default.
+
+  `:frame` is the honest one. A shading, a pattern, a `/Type0` run nobody can
+  decode: a region of the page whose contents this does not have, where a
+  viewer that drew nothing would show a page that looks complete and is not.
+  So the region is placed, named and marked as undrawn. Silence is the one
+  thing it must not be."
+  #{:text :rule :image :frame})
 
 ;; ── geometry ─────────────────────────────────────────────────────────────────
 
@@ -124,6 +130,22 @@
                        :item/width (round width) :item/height (round height)}
                 (finite? ink) (assoc :item/ink (round ink 3)))))
 
+(defn image-item
+  "A raster whose pixels are somewhere else.
+
+  `index` is the image's position in the page's own image list, so a host can
+  route to it without a document-supplied string ever reaching a URL. That is
+  the whole reason it is not the `/XObject` name: the name is file content.
+
+  `media-type` is what the bytes already are when the host can pass them
+  through — a `DCTDecode` XObject IS a JPEG, so serving one costs no decoder.
+  nil when they are raw samples somebody has to encode."
+  [{:keys [x y width height index media-type]}]
+  (item :image (cond-> {:item/x (round x) :item/y (round y)
+                        :item/width (round width) :item/height (round height)
+                        :item/index index}
+                 (seq media-type) (assoc :item/media-type (str media-type)))))
+
 (defn frame-item
   "A region whose contents are not decoded — see `item-kinds`."
   [{:keys [x y width height label reason]}]
@@ -165,6 +187,78 @@
         (:page/items p)))
 
 (defn text-chars [p] (reduce + 0 (map count (text-of p))))
+
+(defn- column-of
+  "Which vertical band a run starts in, given the page width and a column
+  count. Bands rather than clustering: a two-column paper puts every run
+  wholly inside one half, and a clustering that inferred the split from the
+  data would also infer one on a page that has no columns at all."
+  [width columns x]
+  (if (or (nil? width) (not (pos? width)) (< columns 2))
+    0
+    (min (dec columns) (long (/ (* columns (max 0.0 (double x))) (double width))))))
+
+(defn- column-count
+  "How many columns the runs are consistent with — 2 or 1.
+
+  Two columns only when BOTH halves carry a real share of the text and almost
+  nothing straddles the gutter. A page-wide title straddles it, which is why
+  the test is on the share rather than on the presence of a straddler.
+
+  Deliberately not 3+. Nothing in the sample this was measured against had
+  three, and a heuristic that can produce an answer nobody has checked is a
+  heuristic that will produce it on somebody's invoice."
+  [{:page/keys [width items]}]
+  (let [runs (filter #(= :text (:item/kind %)) items)
+        n (count runs)]
+    (if (or (< n 12) (not (pos? width)))
+      1
+      (let [mid (/ (double width) 2.0)
+            ;; A run straddles when it starts left of the gutter and its
+            ;; measured width carries it past. Unmeasured runs cannot
+            ;; straddle by this test, and are not counted either way.
+            straddling (count (filter (fn [{:item/keys [x width]}]
+                                        (and width (< x mid) (> (+ x width) mid)))
+                                      runs))
+            left (count (filter #(< (:item/x %) mid) runs))
+            right (- n left)]
+        (if (and (> (/ (double (min left right)) n) 0.25)
+                 (< (/ (double straddling) n) 0.05))
+          2
+          1)))))
+
+(defn reading-order
+  "The text runs, in the order a person reads them.
+
+  Content-stream order is the order the PRODUCER emitted marks. For most
+  single-column documents that is close enough to reading order to quote; for
+  a two-column paper it interleaves the columns, and for anything that draws
+  its header last it starts in the middle.
+
+  So: group into columns, then sort down the page and across the line. `band`
+  is what makes the second part work — two runs on one baseline rarely have
+  exactly equal `y`, and sorting on raw `y` puts a superscript before the word
+  it belongs to. Rounding to a band the height of the text makes them equal
+  again, which is the same thing the eye does.
+
+  This is a heuristic and is kept separate from `text-of` rather than replacing
+  it. `text-of` is what the document says in the order it said it — a fact.
+  This is a guess about how to read it, and a caller that needs the fact should
+  not have to opt out of the guess."
+  ([p] (reading-order p {}))
+  ([{:page/keys [width items] :as p} {:keys [band] :or {band 4.0}}]
+   (let [columns (column-count p)]
+     (->> items
+          (filter #(= :text (:item/kind %)))
+          (sort-by (juxt #(column-of width columns (:item/x %))
+                         #(Math/round (/ (double (:item/y %)) (double band)))
+                         :item/x))
+          vec))))
+
+(defn reading-text
+  "`reading-order`'s runs as one string, joined the way a line break is."
+  [p]
+  (str/join " " (map :item/text (reading-order p))))
 
 (defn scanned?
   "Nothing to select and nothing to search: no text, but something there.

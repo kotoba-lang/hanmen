@@ -72,6 +72,21 @@ No element here takes a URL, so the fragment loads nothing and the host's CSP
 does not have to be widened to show a page. Deciding what a page may load is a
 decision on its own, not a side effect of adding a viewer.
 
+## Ink, and text that is knocked out of it
+
+Every fill-colour operator records ink — `g`, `rg`, `k`, and the
+space-dependent `sc`/`scn`, chosen by operand arity because that is what
+actually distinguishes them. Tracking only the first two left a CMYK fill
+recording nothing and drawing at full strength, which is the PDF default and
+therefore not obviously wrong until you look at a poster.
+
+Text carries ink too. It was the one mark that did not, which is invisible on
+the documents everybody has — black on white — and wrong on a heading
+reversed out of a dark panel, where it drew the text in the same ink as the
+panel beneath it. Low-ink text paints in `var(--hanmen-paper, canvas)`: a
+threshold rather than an opacity, because text at 0.3 of the ink is not faint
+text, it is unreadable text.
+
 ## It picks no colour and no font
 
 Everything paints in `currentColor` under a class. The host's tokens decide
@@ -140,7 +155,7 @@ clojure -M:test         # pinned git deps
 clojure -M:lint
 ```
 
-52 tests / 169 assertions. Every placement assertion is a coordinate against a
+55 tests / 188 assertions. Every placement assertion is a coordinate against a
 PDF the test wrote, not a rendering somebody looked at.
 
 Measured out of sample against 30 real PDFs: 12,584 text runs, 2,083 rules, 57

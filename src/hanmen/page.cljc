@@ -108,12 +108,19 @@
   right place and ends wherever the drawer's font puts it. Those are
   different qualities of answer and they are kept distinguishable rather than
   averaged into a guess."
-  [{:keys [x y size text width font direction]}]
+  [{:keys [x y size text width font direction ink]}]
   (item :text (cond-> {:item/x (round x) :item/y (round y)
                        :item/size (round size)
                        :item/text (str text)}
                 (finite? width) (assoc :item/width (round width))
                 (seq font) (assoc :item/font (str font))
+                ;; Ink, on the same scale as a rule's: 1 is as dark as this
+                ;; document goes and 0 is nothing. Text was the one mark that
+                ;; carried no colour, which is invisible on the documents
+                ;; everybody has — black on white — and wrong on the ones
+                ;; with a heading knocked out of a dark panel, where it drew
+                ;; the text in the same ink as the panel under it.
+                (finite? ink) (assoc :item/ink (round ink 3))
                 direction (assoc :item/direction direction))))
 
 (defn rule-item

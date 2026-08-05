@@ -335,7 +335,7 @@
 
 (defn- run-of
   "One string operand, placed, as either a text item or a frame."
-  [{:keys [text-state ctm tm fonts]} chars]
+  [{:keys [text-state ctm tm fonts] grey :gray} chars]
   (let [{:keys [font size char-spacing word-spacing horizontal rise render-mode]} text-state
         fd (get fonts font)
         composite? (boolean (:composite? fd))
@@ -379,6 +379,9 @@
               {:x x :y y :size drawn-size :text text
                :font (:base-font fd)
                :width (when widths (* advance (y-scale ctm)))
+               ;; Nil when no colour operator has run, which per the spec
+               ;; means black — `hanmen.svg` reads an absent ink as full.
+               :ink (when (number? grey) (- 1.0 grey))
                :direction (when (= render-mode 3) :invisible)}))}))
 
 (defn- flip
@@ -408,6 +411,30 @@
     (if (and (= 4 (count b)) (every? number? b))
       (mapv double b)
       [0.0 0.0 612.0 792.0])))
+
+(defn- fill-grey
+  "The grey a colour operator's operands come to, or `previous` if they are
+  not a colour this understands.
+
+  Chosen by ARITY, because that is what actually distinguishes them: `g`
+  takes one component, `rg` three, `k` four, and `sc`/`scn` take however many
+  the current colour space has — so a single rule covers the named operators
+  and the space-dependent ones together. `scn` with a pattern name has no
+  numeric operands at all and falls through to `previous`, which is the
+  honest answer: a pattern's average colour is not something this can know.
+
+  CMYK converts through its naive RGB, which is what viewers do for
+  screen-only rendering and what nobody should print from."
+  [nums previous]
+  (case (count nums)
+    1 (double (first nums))
+    3 (let [[r g b] nums] (+ (* 0.299 r) (* 0.587 g) (* 0.114 b)))
+    4 (let [[c m y k] nums
+            [r g b] [(* (- 1.0 c) (- 1.0 k))
+                     (* (- 1.0 m) (- 1.0 k))
+                     (* (- 1.0 y) (- 1.0 k))]]
+        (+ (* 0.299 r) (* 0.587 g) (* 0.114 b)))
+    previous))
 
 (defn- number-operands [stack]
   (into [] (comp (filter #(= :num (first %))) (map second)) stack))
@@ -624,15 +651,17 @@
                     (recur rest-tokens [] (dissoc state :pending-rect) (conj! items item)))
                   (recur rest-tokens [] state items))
 
-                ("g" "G") (recur rest-tokens []
-                                 (assoc state :gray (double (or (last nums) 0.0))) items)
-                ("rg" "RG") (recur rest-tokens []
-                                   (assoc state :gray
-                                          (if (= 3 (count (take-last 3 nums)))
-                                            (let [[r g b] (take-last 3 nums)]
-                                              (+ (* 0.299 r) (* 0.587 g) (* 0.114 b)))
-                                            (:gray state)))
-                                   items)
+                ;; Every operator that sets a fill colour, not only the two
+                ;; easy ones. `g` and `rg` were tracked and `k`/`sc`/`scn`
+                ;; were not, so a fill in CMYK or a named colour space
+                ;; recorded NO ink and drew at full strength — which is the
+                ;; PDF default and therefore not obviously a bug. Seen on a
+                ;; real poster: a pale panel behind a column came out as a
+                ;; solid block, in the one place looking at it was the only
+                ;; way to find out.
+                ("g" "G" "rg" "RG" "k" "K" "sc" "SC" "scn" "SCN")
+                (recur rest-tokens [] (assoc state :gray (fill-grey nums (:gray state)))
+                       items)
 
                 "Do" (recur rest-tokens [] state
                             (if-let [nm (last names)]
@@ -646,6 +675,37 @@
                 ;; this level has no opinion about.
                 (recur rest-tokens [] state items)))))
         (persistent! items))))
+
+(defn- on-page
+  "The marks that are on the page.
+
+  A content stream may draw anywhere; the page box is what the reader sees,
+  and PDF clips to it. Measured on a real poster: a rule at (9321, 10277) on
+  a 2384×3370 page — four page-widths off the edge. Harmless to a drawer
+  whose viewBox clips it, and not harmless to a count of what is on the
+  page, a digest over the marks, or anything that lays them out itself.
+
+  Only the far side, and only on the item's own start point. A text run's
+  `x` is a baseline START and its width is absent whenever the font shipped
+  no `/Widths` — so treating an unmeasured run as zero-wide and dropping it
+  for starting at −5 would delete text that is on the page. It did, on the
+  first run of this: the second half of a `TJ` whose kerning pulled it left
+  past the origin.
+
+  So a mark is dropped when it BEGINS past the right or bottom edge, which
+  is the case that was measured, and when a known positive extent puts it
+  entirely off the left or top. Anything else stays whole — trimming a
+  straddler would need the clip path this does not track, and half a letter
+  is worse than a letter that runs off."
+  [items width height]
+  (into []
+        (remove (fn [{:item/keys [x y] :as it}]
+                  (let [w (:item/width it)
+                        h (:item/height it)]
+                    (or (> x width) (> y height)
+                        (and (number? w) (pos? w) (< (+ x w) 0.0))
+                        (and (number? h) (pos? h) (< (+ y h) 0.0))))))
+        items))
 
 (defn walk
   "One page's content stream into placed marks, plus the size it is on.
@@ -665,8 +725,8 @@
                 :fonts (or (font-table objs page-dict) {})
                 :xobjects (or (pdf/resolve-ref objs (:XObject res)) {})}
                0 #{} images)]
-    {:items items :width width :height height :rotation rotation
-     :image-refs @images}))
+    {:items (on-page items width height) :width width :height height
+     :rotation rotation :image-refs @images}))
 
 ;; ── the public shape ─────────────────────────────────────────────────────────
 

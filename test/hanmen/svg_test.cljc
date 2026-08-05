@@ -46,9 +46,42 @@
            (:type (try (svg/serialize [:rect {:href "https://example.test"}])
                        (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) e
                          (ex-data e))))))
-    ;; Specifically: there is no element here that takes a URL. That is what
-    ;; makes the fragment inert inside `default-src 'none'`.
-    (is (empty? (filter #(contains? % "href") (vals svg/allowed-attributes))))))
+    ;; Exactly one element may carry a URL, and only when the caller asked
+    ;; for images. The default fragment loads nothing, which is what lets it
+    ;; live inside `default-src 'none'` unchanged.
+    (is (= #{"image"}
+           (set (keep (fn [[el attrs]] (when (contains? attrs "href") el))
+                      svg/allowed-attributes))))))
+
+(deftest an-image-loads-nothing-until-the-host-says-where-from
+  (let [p (page-with (page/image-item {:x 0 :y 0 :width 10 :height 10 :index 0
+                                       :media-type "image/jpeg"}))]
+    (testing "no href by default — the host has not decided its CSP"
+      (let [out (svg/->svg p)]
+        (is (not (str/includes? out "href")))
+        (is (not (str/includes? out "<image")))
+        ;; Outlined, like a frame: something is there and this cannot show it.
+        (is (str/includes? out "hanmen-frame__box"))
+        (is (str/includes? out "<title>image 0</title>"))))
+    (testing "and the host's own path when it has"
+      (let [out (svg/->svg p {:image-href (fn [{:keys [index]}]
+                                            (str "/api/pages/0/images/" index))})]
+        (is (str/includes? out "<image "))
+        (is (str/includes? out "href=\"/api/pages/0/images/0\""))
+        (is (str/includes? out "preserveAspectRatio=\"none\""))))))
+
+(deftest an-image-href-that-leaves-this-origin-is-refused
+  ;; The check that makes "no document content reaches a URL" a property
+  ;; rather than a convention: even the HOST cannot point this off-origin.
+  (let [p (page-with (page/image-item {:x 0 :y 0 :width 1 :height 1 :index 0}))]
+    (doseq [bad ["https://example.test/x.png" "//example.test/x.png"
+                 "javascript:alert(1)" "data:image/png;base64,AAA"
+                 "\\\\example.test\\x.png" "x.png"]]
+      (is (= :hanmen/foreign-image-href
+             (:type (try (svg/->svg p {:image-href (constantly bad)})
+                         (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) e
+                           (ex-data e)))))
+          bad))))
 
 (deftest an-unknown-item-kind-is-loud
   ;; A kind added to the model without a case here would otherwise vanish

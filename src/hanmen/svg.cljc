@@ -49,18 +49,27 @@
   "Every element this may emit. `foreignObject` is absent for the obvious
   reason and `style` for the less obvious one: a stylesheet in the fragment
   would be a second place styling is decided, and the host's is the only one."
-  #{"svg" "g" "rect" "text" "title" "desc"})
+  #{"svg" "g" "rect" "text" "image" "title" "desc"})
 
 (def allowed-attributes
-  "Per element, so that `href` cannot appear anywhere at all — not on `text`
-  by a typo and not on `svg` by a future edit. There is no element here that
-  takes a URL, which is what makes the fragment inert."
+  "Per element, so that `href` cannot appear on `text` by a typo or on `svg`
+  by a future edit.
+
+  `image/href` is the one URL in the file and it is worth saying exactly what
+  it is and is not. It appears ONLY when the caller passes `:image-href`, so a
+  host that has not decided its CSP gets a fragment that loads nothing. The
+  URL is what that function returned; the item it was called with carries an
+  integer index and never the `/XObject` name, so there is no path from
+  document content into a URL even when images are on. `emit-image` refuses a
+  returned value that is not a same-origin path, which is the check that makes
+  that a property rather than a convention."
   {"svg" #{"viewBox" "width" "height" "class" "role" "aria-label"
            "preserveAspectRatio" "xmlns"}
    "g" #{"class" "transform"}
    "rect" #{"x" "y" "width" "height" "class" "fill-opacity"}
    "text" #{"x" "y" "class" "font-size" "textLength" "lengthAdjust"
             "fill-opacity" "xml:space"}
+   "image" #{"x" "y" "width" "height" "class" "href" "preserveAspectRatio"}
    "title" #{}
    "desc" #{}})
 
@@ -137,6 +146,43 @@
 
 ;; ── items ────────────────────────────────────────────────────────────────────
 
+(defn- same-origin-path?
+  "A root-relative path with no scheme, no authority and no backslash.
+
+  The narrowest thing that can still name a resource on the page's own origin.
+  `//host/x` is protocol-relative and reaches another origin; `\\` is a path
+  separator to some parsers and not to others, which is exactly the kind of
+  disagreement a URL check should refuse rather than resolve."
+  [value]
+  (boolean (and (string? value)
+                (str/starts-with? value "/")
+                (not (str/starts-with? value "//"))
+                (not (str/includes? value "\\"))
+                (not (re-find #"(?i)^[a-z][a-z0-9+.-]*:" value)))))
+
+(defn- emit-image
+  "A raster, when the caller said where its pixels are."
+  [{:item/keys [x y width height index]} image-href]
+  (let [href (when image-href (image-href {:index index}))]
+    (if-not (some? href)
+      ;; No source: the region, outlined. The same answer a `:frame` gets,
+      ;; because it is the same situation — something is there and this
+      ;; cannot show it.
+      [:g {:class "hanmen-frame"}
+       [:title (str "image " index)]
+       [:rect {:x x :y y :width width :height height :class "hanmen-frame__box"}]]
+      (do
+        (when-not (same-origin-path? href)
+          (throw (ex-info (str "hanmen.svg was given an image href that is not a "
+                               "same-origin path: " (pr-str href))
+                          {:type :hanmen/foreign-image-href :href href})))
+        [:image {:x x :y y :width width :height height
+                 :class "hanmen-image" :href href
+                 ;; The XObject's box is where the image goes; a raster that
+                 ;; kept its own aspect ratio would leave the page's layout
+                 ;; and the image disagreeing about where the edges are.
+                 :preserveAspectRatio "none"}]))))
+
 (defn emit-item
   "One mark as hiccup.
 
@@ -144,8 +190,11 @@
   `hanmen.page/item-kinds` without a case here is a mark that vanishes from
   every rendering, and a page that is quietly missing something looks exactly
   like a page that is complete."
-  [{:item/keys [kind x y width height text size ink label reason direction]}]
-  (case kind
+  ([item] (emit-item item nil))
+  ([{:item/keys [kind x y width height text size ink label reason direction]
+     :as item}
+    image-href]
+   (case kind
     :text
     (let [invisible? (= direction :invisible)]
       [:text (cond-> {:x x :y y :class (if invisible? "hanmen-text hanmen-text--invisible"
@@ -171,13 +220,15 @@
              ;; that never issued a colour operator means.
              (number? ink) (assoc :fill-opacity ink))]
 
+    :image (emit-image item image-href)
+
     :frame
     [:g {:class "hanmen-frame"}
      [:title (str label " — " (name (or reason :undecoded)))]
      [:rect {:x x :y y :width width :height height :class "hanmen-frame__box"}]]
 
     (throw (ex-info (str "hanmen.svg has no case for item kind: " kind)
-                    {:type :hanmen/unhandled-item-kind :kind kind}))))
+                    {:type :hanmen/unhandled-item-kind :kind kind})))))
 
 ;; ── the page ─────────────────────────────────────────────────────────────────
 
@@ -206,7 +257,9 @@
             ;; forty graphics is a document nobody can navigate.
             :aria-label (str (or label (str "Page " (inc (or index 0))))
                              (when (page/scanned? p) " (scanned — no text)"))}
-      (into [:g {:class "hanmen-page__marks"}] (map emit-item) items)])))
+      (into [:g {:class "hanmen-page__marks"}]
+            (map #(emit-item % (:image-href opts)))
+            items)])))
 
 (defn ->svg
   "A page as an SVG string, allowlist-enforced."
@@ -229,5 +282,6 @@
        ".hanmen-text{fill:currentColor;font-family:var(--hanmen-font,inherit);"
        "white-space:pre}"
        ".hanmen-rule{fill:currentColor}"
+       ".hanmen-image{image-rendering:auto}"
        ".hanmen-frame__box{fill:none;stroke:currentColor;stroke-opacity:.35;"
        "stroke-dasharray:4 3;stroke-width:1}"))

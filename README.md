@@ -42,11 +42,20 @@ that space; when they are not, the width is **absent rather than estimated** —
 an estimate would be indistinguishable from a measurement downstream and wrong
 by a different amount on every document.
 
-**What cannot be drawn is placed and marked, never skipped.** An image, a form
-XObject, a `/Type0` run with no `/ToUnicode`: each becomes a `:frame` with a
-label and a reason. A page that quietly omits a mark looks exactly like a page
-that is complete, and `hanmen.svg/emit-item` throws on an unknown kind rather
-than dropping it, so a fourth item kind cannot be added on one side only.
+**A form XObject is run, not outlined.** A form is a content stream with its
+own `/Matrix` and `/Resources` — a figure, a stamp, a letterhead — and a viewer
+that draws its bounding box instead produces a page of empty rectangles.
+Measured: across 30 real PDFs this turned 1,957 dashed boxes into marks, and
+one 24 MB document went from *"scanned, no text"* to 2,932 text runs. Recursion
+is depth-bounded and cycle-guarded, and where it stops it says so.
+
+**What still cannot be drawn is placed and marked, never skipped.** A shading, a
+`/Type0` run with no `/ToUnicode`: each becomes a `:frame` with a label and a
+reason — and the label names the CMap that would decode it (`Adobe-Japan1`), so
+the answer is something a reader can act on. A page that quietly omits a mark
+looks exactly like a page that is complete, and `hanmen.svg/emit-item` throws on
+an unknown kind rather than dropping it, so a fifth item kind cannot be added on
+one side only.
 
 ## The SVG is safe inside `default-src 'none'`
 
@@ -72,14 +81,52 @@ Ink *density* survives (a 60% grey rule stays lighter than a black one, through
 `fill-opacity`), because that difference is the document's meaning and the
 absolute colour is not. Add `hanmen.svg/stylesheet` to the host's stylesheet.
 
+## Images are the host's decision, and the default is inert
+
+An `:image` item carries **the index of the image on its page, never its
+name** — a name is file content and would end up in a URL; an integer cannot
+carry anything a document wrote. `hanmen.pdf/page-images` resolves an index
+back to bytes **through the same traversal that assigned it**, because the
+page's `/XObject` dictionary is in resource order and the two agree only on a
+document that never invokes a form.
+
+A `DCTDecode` XObject **is** a JPEG. A host can serve those bytes as one with
+no decoder at all — 12 of the 57 images in the sample. The rest are raw samples
+and `:media-type` is nil, which says somebody has to encode them rather than
+guessing a type that arrives at a browser as a broken image.
+
+`hanmen.svg` draws an image only when the caller passes `:image-href`, and
+refuses anything that is not a same-origin path:
+
+```clojure
+(svg/->svg page {:image-href (fn [{:keys [index]}]
+                               (str "/api/…/pages/3/images/" index))})
+```
+
+Without it the region is outlined like a frame and **the fragment loads
+nothing**, so a host that has not decided its CSP is not forced to.
+
+## Reading order is a guess, kept apart from the fact
+
+`text-of` is what the document says in the order it said it. `reading-order`
+groups into columns and sorts down the page and across the line, rounding
+baselines into bands so a superscript does not jump the word it belongs to.
+Two columns are inferred only when both halves carry a real share of the text
+and almost nothing straddles the gutter; three are never inferred, because
+nothing in the measured sample had three and a heuristic that can produce an
+unchecked answer will produce it on somebody's invoice.
+
+A caller that needs the fact should not have to opt out of the guess, which is
+why these are two functions.
+
 ## What it does not do
 
-- **No raster.** Image XObjects are placed as frames, not decoded. Drawing them
-  means a `data:` URI, which is a *load*, which is a CSP decision the host owns.
-- **No reading order.** `text-of` is content-stream order — the order the
-  producer emitted marks, which is close enough to reading order to search and
-  nowhere near it to quote. Two-column papers come out interleaved.
+- **No raster decoding.** `FlateDecode` samples come back raw; encoding them to
+  something a browser renders is the host's job (`kotoba-lang/org-w3-png`).
 - **No paths, shading or transparency groups.** Only `re … f` becomes a rule.
+- **No CID→Unicode without `/ToUnicode`.** Measured at 3 of 30 files, 553 runs,
+  550 of them in one LaTeX-CJK document. The frame names the ordering it would
+  need.
 - **No zoom or pan.** `fit` answers the one number a server-side render needs.
   Viewport gestures are `kotoba-lang/canvaskit`'s subject.
 - **No writing.** A viewer that can rewrite what it is showing is a different
@@ -93,5 +140,8 @@ clojure -M:test         # pinned git deps
 clojure -M:lint
 ```
 
-37 tests / 121 assertions. Every placement assertion is a coordinate against a
+52 tests / 169 assertions. Every placement assertion is a coordinate against a
 PDF the test wrote, not a rendering somebody looked at.
+
+Measured out of sample against 30 real PDFs: 12,584 text runs, 2,083 rules, 57
+images, **0 XObject regions left undrawn**.

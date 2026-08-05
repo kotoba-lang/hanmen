@@ -279,6 +279,20 @@
                           [(name k)
                            {:base-font (some-> (:BaseFont fd) name)
                             :composite? (= subtype :Type0)
+                            ;; Named so a refusal can say WHICH CMap resource
+                            ;; would decode it. "Adobe-Japan1" is a fact the
+                            ;; reader can act on; "cannot decode" is not.
+                            :ordering (when (= subtype :Type0)
+                                        (let [desc (first (pdf/resolve-ref
+                                                           objs (:DescendantFonts fd)))
+                                              desc (pdf/resolve-ref objs desc)
+                                              csi (pdf/resolve-ref objs (:CIDSystemInfo desc))]
+                                          (when (map? csi)
+                                            (let [reg (pdf/resolve-ref objs (:Registry csi))
+                                                  ord (pdf/resolve-ref objs (:Ordering csi))]
+                                              (when (and reg ord)
+                                                (str (apply str (map char reg)) "-"
+                                                     (apply str (map char ord))))))))
                             :to-unicode tu-map
                             :widths (when (and (number? first-char) (vector? widths))
                                       (into {}
@@ -353,7 +367,9 @@
              (and composite? (empty? text) (seq codes))
              (page/frame-item {:x x :y (- y drawn-size) :width (* advance (y-scale ctm))
                                :height drawn-size
-                               :label (or (:base-font fd) "text")
+                               :label (str (or (:base-font fd) "text")
+                                           (when (:ordering fd)
+                                             (str " (" (:ordering fd) ")")))
                                :reason :font/no-tounicode})
 
              (str/blank? text) nil
@@ -396,24 +412,105 @@
 (defn- number-operands [stack]
   (into [] (comp (filter #(= :num (first %))) (map second)) stack))
 
-(defn walk
-  "Run one page's content stream into placed marks.
+(def max-form-depth
+  "How deep a form XObject may nest before this stops descending.
 
-  The operand stack is reset after every operator, which is what a content
+  A form's `/Resources` can name the form itself, and a producer does not have
+  to be malicious to emit one — a template that includes itself by mistake is
+  an infinite content stream. `seen` below stops the direct cycle; this stops
+  the long one, and it stops it with a `:frame` so the page says where it gave
+  up rather than quietly missing a region."
+  12)
+
+(defn- image-media-type
+  "What the stored bytes ALREADY are, when they are something on their own.
+
+  A `DCTDecode` XObject is a JPEG file's compressed data — a host can serve it
+  as one without decoding anything, which is the cheapest possible way to put
+  a scanned page on screen. `FlateDecode` is raw samples and somebody has to
+  encode them; nil says so rather than guessing a type that would arrive at a
+  browser as a broken image."
+  [objs xo]
+  (let [f (pdf/resolve-ref objs (:Filter (:dict xo)))
+        fs (cond (nil? f) [] (keyword? f) [f] (vector? f) f :else [])]
+    (when (some #{:DCTDecode} fs) "image/jpeg")))
+
+(defn- resources-of [objs dict]
+  (pdf/resolve-ref objs (:Resources dict)))
+
+(declare run-content)
+
+(defn- do-xobject
+  "`Do`. A form is RUN; an image is placed; anything else is framed.
+
+  Running the form is the whole point of this function existing. A form
+  XObject is a content stream with its own `/Matrix` and `/Resources` — a
+  figure, a stamp, a letterhead — and a viewer that outlines them instead
+  draws a page of empty boxes. Measured before it was written: one figure in
+  the sample produced 1,415 boxes where the drawing was."
+  [objs state name depth seen images]
+  (let [xo (pdf/resolve-ref objs (get (:xobjects state) (keyword name)))
+        [x0 y0] (apply-point (:ctm state) [0.0 0.0])
+        [x1 y1] (apply-point (:ctm state) [1.0 1.0])
+        box {:x (min x0 x1) :y (min y0 y1)
+             :width (Math/abs (- x1 x0)) :height (Math/abs (- y1 y0))}
+        ref (get (:xobjects state) (keyword name))]
+    (cond
+      (not (map? xo)) []
+
+      (= :Image (:Subtype (:dict xo)))
+      ;; The index is this image's position in `images`, which is the order
+      ;; `Do` reached it — forms included. A host resolving an index back to
+      ;; bytes MUST use `page-images`, which reads the same vector, rather
+      ;; than the page's `/XObject` dictionary: that is resource order, and
+      ;; the two agree only on documents that never invoke a form.
+      [(page/image-item (assoc box
+                               :index (dec (count (swap! images conj ref)))
+                               :media-type (image-media-type objs xo)))]
+
+      (and (= :Form (:Subtype (:dict xo)))
+           (< depth max-form-depth)
+           (not (contains? seen ref)))
+      (let [dict (:dict xo)
+            matrix (let [m (mapv #(pdf/resolve-ref objs %)
+                                 (pdf/resolve-ref objs (:Matrix dict)))]
+                     (if (and (= 6 (count m)) (every? number? m))
+                       (mapv double m)
+                       identity-matrix))
+            res (or (resources-of objs dict) {})
+            ;; The form's own resources, falling back to the page's. A form
+            ;; that names /F1 without declaring it means the page's /F1, and
+            ;; a reader that only looked in the form would silently place its
+            ;; text at size zero.
+            child (assoc state
+                         :ctm (mul matrix (:ctm state))
+                         :fonts (merge (:fonts state)
+                                       (or (font-table objs {:Resources res}) {}))
+                         :xobjects (merge (:xobjects state)
+                                          (or (pdf/resolve-ref objs (:XObject res)) {}))
+                         :gs [] :tm identity-matrix :tlm identity-matrix
+                         :text-state initial-text-state)]
+        (run-content objs
+                     (apply str (map char (pdf/decode-stream objs xo)))
+                     child (inc depth) (conj seen ref) images))
+
+      (= :Form (:Subtype (:dict xo)))
+      [(page/frame-item (assoc box :label name :reason :form/too-deep))]
+
+      :else
+      [(page/frame-item (assoc box :label name :reason :xobject/not-run))])))
+
+(defn run-content
+  "One content stream into placed marks, in the state it is handed.
+
+  Called for a page and, recursively, for every form XObject it invokes. The
+  operand stack is reset after every operator, which is what a content
   stream's grammar actually says and is why a malformed one degrades into
   missing marks rather than into marks in the wrong place."
-  [objs page-dict]
-  (let [content (pdf/page-content-str objs page-dict)
-        rotation (or (pdf/resolve-ref objs (:Rotate page-dict)) 0)
-        {base :matrix :keys [width height]} (flip (media-box objs page-dict) rotation)
-        fonts (or (font-table objs page-dict) {})
-        xobjects (let [res (pdf/resolve-ref objs (:Resources page-dict))]
-                   (pdf/resolve-ref objs (:XObject res)))]
-    (loop [tokens (tokenize content)
+  [objs content state depth seen images]
+  (loop [tokens (tokenize content)
            stack []
-           state {:ctm base :gs [] :text-state initial-text-state
-                  :tm identity-matrix :tlm identity-matrix :gray nil
-                  :fonts fonts}
+           state state
            items (transient [])]
       (if-let [[kind value] (first tokens)]
         (let [rest-tokens (rest tokens)]
@@ -537,29 +634,39 @@
                                             (:gray state)))
                                    items)
 
-                "Do" (let [nm (last names)
-                           xo (pdf/resolve-ref objs (get xobjects (keyword nm)))
-                           [x0 y0] (apply-point (:ctm state) [0.0 0.0])
-                           [x1 y1] (apply-point (:ctm state) [1.0 1.0])]
-                       (recur rest-tokens [] state
-                              (if (and nm (map? xo))
-                                (conj! items
-                                       (page/frame-item
-                                        {:x (min x0 x1) :y (min y0 y1)
-                                         :width (Math/abs (- x1 x0))
-                                         :height (Math/abs (- y1 y0))
-                                         :label nm
-                                         :reason (if (= :Image (:Subtype (:dict xo)))
-                                                   :image/not-decoded
-                                                   :xobject/not-run)}))
-                                items)))
+                "Do" (recur rest-tokens [] state
+                            (if-let [nm (last names)]
+                              (reduce conj! items
+                                      (do-xobject objs state nm depth seen images))
+                              items))
 
                 ;; Everything else — paths, clipping, colour spaces, marked
                 ;; content — advances no state this cares about. Not an
                 ;; error: a content stream is full of operators a viewer at
                 ;; this level has no opinion about.
                 (recur rest-tokens [] state items)))))
-        {:items (persistent! items) :width width :height height :rotation rotation}))))
+        (persistent! items))))
+
+(defn walk
+  "One page's content stream into placed marks, plus the size it is on.
+
+  The page's own `/Resources` seed the state; a form XObject reached from here
+  gets its own, merged over these — see `do-xobject`."
+  [objs page-dict]
+  (let [rotation (or (pdf/resolve-ref objs (:Rotate page-dict)) 0)
+        {base :matrix :keys [width height]} (flip (media-box objs page-dict) rotation)
+        res (resources-of objs page-dict)
+        images (atom [])
+        items (run-content
+               objs
+               (pdf/page-content-str objs page-dict)
+               {:ctm base :gs [] :text-state initial-text-state
+                :tm identity-matrix :tlm identity-matrix :gray nil
+                :fonts (or (font-table objs page-dict) {})
+                :xobjects (or (pdf/resolve-ref objs (:XObject res)) {})}
+               0 #{} images)]
+    {:items items :width width :height height :rotation rotation
+     :image-refs @images}))
 
 ;; ── the public shape ─────────────────────────────────────────────────────────
 
@@ -594,6 +701,33 @@
       (let [{:keys [items width height rotation]} (walk objs dict)]
         (page/page {:index index :width width :height height
                     :rotation rotation :items items})))))
+
+(defn page-images
+  "The page's images, in the order `Do` reached them — the order
+  `:item/index` counts in.
+
+  One traversal defines both, which is the point: reading the page's
+  `/XObject` dictionary instead would give resource order, and the two agree
+  only on a document that never invokes a form. A host that mixed them would
+  serve the wrong picture for the right box, on exactly the documents whose
+  pictures matter.
+
+  `:bytes` is what `pdf.core/decode-stream` gives: for `DCTDecode` that is a
+  JPEG file, ready to serve as one. For anything else it is raw samples and
+  `:media-type` is nil, which is the honest way to say somebody has to encode
+  them before a browser will show them."
+  [parsed index]
+  (let [objs (:objects parsed)
+        dict (nth (page-dicts parsed) index nil)]
+    (when dict
+      (mapv (fn [ref]
+              (let [xo (pdf/resolve-ref objs ref)
+                    d (:dict xo)]
+                {:media-type (image-media-type objs xo)
+                 :width (pdf/resolve-ref objs (:Width d))
+                 :height (pdf/resolve-ref objs (:Height d))
+                 :bytes (pdf/decode-stream objs xo)}))
+            (:image-refs (walk objs dict))))))
 
 (defn read-document
   "Every page of `bytes`, as a `hanmen.page/document`.

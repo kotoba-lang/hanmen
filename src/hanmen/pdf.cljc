@@ -375,14 +375,22 @@
              (str/blank? text) nil
 
              :else
-             (page/text-item
-              {:x x :y y :size drawn-size :text text
-               :font (:base-font fd)
-               :width (when widths (* advance (y-scale ctm)))
-               ;; Nil when no colour operator has run, which per the spec
-               ;; means black — `hanmen.svg` reads an absent ink as full.
-               :ink (when (number? grey) (- 1.0 grey))
-               :direction (when (= render-mode 3) :invisible)}))}))
+             (-> (page/text-item
+                  {:x x :y y :size drawn-size :text text
+                   :font (:base-font fd)
+                   :width (when widths (* advance (y-scale ctm)))
+                   ;; Nil when no colour operator has run, which per the
+                   ;; spec means black — `hanmen.svg` reads an absent ink
+                   ;; as full.
+                   :ink (when (number? grey) (- 1.0 grey))
+                   :direction (when (= render-mode 3) :invisible)})
+                 ;; Where the pen ends up, in reader space. Not part of the
+                 ;; model — `coalesce` strips both of these — but the exact
+                 ;; number the next run has to start at to be the same word.
+                 ;; Carrying it beats re-deriving it downstream from a width
+                 ;; that is often absent on purpose.
+                 (assoc ::end-x (page/round (+ x (* advance (y-scale ctm))))
+                        ::size-hint (page/round drawn-size))))}))
 
 (defn- flip
   "Reader space out of PDF user space, with the page's rotation applied.
@@ -676,6 +684,96 @@
                 (recur rest-tokens [] state items)))))
         (persistent! items))))
 
+(def ^:private space-fraction
+  "A gap this wide, as a fraction of the type size, is a word space.
+
+  Below it the two runs are halves of one word — a producer that emits one
+  `Tj` per glyph leaves gaps of exactly the advance, which rounds to nothing.
+  Too low and every space disappears; too high and words run together, and
+  the first failure is the silent one because the text still looks like
+  text."
+  0.18)
+
+(def ^:private join-fraction
+  "A gap wider than this ends the run instead of spacing it.
+
+  0.6 em. What it is protecting is the case a coalescer gets wrong loudly: a
+  two-column line whose halves share a baseline, and a tab stop that is there
+  to make a gap. Real column gutters are several em, so this sits well below
+  them and well above a word space."
+  0.6)
+
+(defn coalesce
+  "Consecutive text runs that are one word, joined into one.
+
+  ## Why this is not cosmetic
+
+  A producer is free to emit one `Tj` per glyph, and plenty do — kerning
+  each pair individually is the easiest way to place type exactly. Measured:
+  an audit-report cover emitted 52 runs for one line, so `text-of` returned
+  `[\"O\" \"p\" \"e\" \"n\" …]`. That is not a search index and it is not a
+  quotation; it is a page nobody can read out of.
+
+  It is also what makes a drawn page look wrong. Each glyph placed at its own
+  document x, in a font that is not the document's, spaces unevenly — the
+  reader sees `Cont r act s` and blames the renderer. Joined, the browser
+  lays the word out itself and only the WORD's start comes from the
+  document, which is both truer and better looking.
+
+  ## Two thresholds, because a gap means three different things
+
+  Nothing (`< space-fraction`) is one word; a word space
+  (`< join-fraction`) is one phrase with a space put back; anything wider
+  ends the run. The last one is what stops a two-column line from becoming
+  a single sentence, and it is the failure that would be loud — the other
+  direction, losing every space, still looks like text.
+
+  ## Joined only when they are exactly contiguous
+
+  The pen's end position is known (`::end-x`, from the advance), so this is
+  an equality test and not a guess: a run joins the previous one when it
+  starts where the previous one ended. A gap wider than that gets a space if
+  it is wide enough to be one, and otherwise starts a new run — so a two-
+  column line never becomes one word, and a tab stop does not swallow the
+  gap it was there to make.
+
+  Same baseline, same size, same font, same ink, same direction: anything
+  else is a different piece of type and stays its own run."
+  [items]
+  (letfn [(joinable? [a b]
+            (and (= :text (:item/kind a)) (= :text (:item/kind b))
+                 (= (:item/y a) (:item/y b))
+                 (= (:item/size a) (:item/size b))
+                 (= (:item/font a) (:item/font b))
+                 (= (:item/ink a) (:item/ink b))
+                 (= (:item/direction a) (:item/direction b))
+                 (::end-x a)
+                 (let [gap (- (:item/x b) (::end-x a))]
+                   (and (>= gap -0.5)
+                        (< gap (* join-fraction (or (::size-hint a) 0.0)))))))
+          (spaced? [a b]
+            (let [gap (- (:item/x b) (::end-x a))]
+              (>= gap (* space-fraction (or (::size-hint a) 0.0)))))
+          (join [a b]
+            (-> a
+                (update :item/text str (when (spaced? a b) " ") (:item/text b))
+                (assoc ::end-x (::end-x b))
+                ;; The joined run's measured width is the distance the pen
+                ;; actually travelled, which is only knowable when both
+                ;; halves were measured.
+                (as-> m (if (and (:item/width a) (:item/width b))
+                          (assoc m :item/width (page/round
+                                                (- (::end-x b) (:item/x a))))
+                          (dissoc m :item/width)))))]
+    (into []
+          (map #(dissoc % ::end-x ::size-hint))
+          (reduce (fn [acc it]
+                    (let [prev (peek acc)]
+                      (if (and prev (joinable? prev it))
+                        (conj (pop acc) (join prev it))
+                        (conj acc it))))
+                  [] items))))
+
 (defn- on-page
   "The marks that are on the page.
 
@@ -725,7 +823,7 @@
                 :fonts (or (font-table objs page-dict) {})
                 :xobjects (or (pdf/resolve-ref objs (:XObject res)) {})}
                0 #{} images)]
-    {:items (on-page items width height) :width width :height height
+    {:items (coalesce (on-page items width height)) :width width :height height
      :rotation rotation :image-refs @images}))
 
 ;; ── the public shape ─────────────────────────────────────────────────────────

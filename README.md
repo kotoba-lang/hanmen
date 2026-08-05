@@ -96,6 +96,34 @@ Fill and stroke carry separate ink, because lower-case colour operators set
 one and upper-case the other — treating them as one is how a hairline table
 border ends up the colour of the cell behind it.
 
+## Constant alpha reaches the ink
+
+`gs` was ignored entirely, and after the drawing operators it is the most
+common thing in the corpus: **1,100 calls across 86 documents, 217 setting a
+stroke alpha below 1**. A 30%-alpha hairline drawn at full ink is a black
+line where the document has a grey one — and every one of them came out the
+same shade. Measured: distinct ink levels **319 → 485**.
+
+`/ca` and `/CA` multiply into ink rather than becoming a separate channel.
+That is exact for a single layer on paper — 50% of black ink IS grey — and
+an approximation the moment marks overlap, which is what a real compositor
+is for and what this is not.
+
+Two things this needed that were wrong on their own:
+
+- The initial colour is now **black, per the spec**, not nil. Starting at nil
+  made *no colour operator yet* and *a colour this cannot read* the same
+  value, and lost every alpha set before the first colour — which is most of
+  them, because `gs` usually comes first.
+- A form XObject looks up **its own** `/ExtGState` and `/Pattern`, not the
+  page's. A form that names `/G1` means its own, and reading the page's is
+  how a stamp ends up drawn at the alpha of whatever the page called `G1`.
+
+A fill whose colour is a **pattern** now says so (`:item/pattern`). Before,
+`scn` with a name left the previous colour, so the shape was filled in
+whatever happened to be set last — an arbitrary colour presented as the
+document's.
+
 ## The clip is honoured, as a box
 
 `W n` marks the current path as the clip and ends it without painting. A
@@ -201,9 +229,12 @@ why these are two functions.
 
 - **No raster decoding.** `FlateDecode` samples come back raw; encoding them to
   something a browser renders is the host's job (`kotoba-lang/org-w3-png`).
-- **No shading, patterns or transparency groups.** `sh` paints the clip
-  region, and the clip path is not tracked; a pattern fill leaves the
-  previous colour rather than inventing an average.
+- **No shadings, and no soft masks or blend modes.** Measured at **zero
+  occurrences** across 86 documents — `sh` never appears, no `/Shading`
+  resource, no `/SMask`, no non-normal `/BM`. Code for a feature nobody can
+  test against real files is code nobody should trust.
+- **A tiling pattern is marked, not tiled.** Running one means deciding how
+  many times, and a 2pt tile over a page is thousands of copies.
 - **CID→Unicode without `/ToUnicode` needs a table from the host.** Measured across 160 documents and
   576 `/Type0` fonts: 549 ship one and are read; 25 do not and are
   `CIDFontType0C`; 2 have no embedded font; **zero** are the SFNT case an
@@ -227,7 +258,7 @@ clojure -M:test         # pinned git deps
 clojure -M:lint
 ```
 
-66 tests / 232 assertions. Every placement assertion is a coordinate against a
+68 tests / 237 assertions. Every placement assertion is a coordinate against a
 PDF the test wrote, not a rendering somebody looked at.
 
 Measured out of sample against 30 real PDFs: 12,584 text runs, 2,083 rules, 57

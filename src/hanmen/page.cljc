@@ -158,10 +158,11 @@
   a producer converts on the way in. Carrying the format's inverted
   convention into a format-neutral model is how a second producer ends up
   drawing every rule in negative."
-  [{:keys [x y width height ink]}]
+  [{:keys [x y width height ink pattern]}]
   (item :rule (cond-> {:item/x (round x) :item/y (round y)
                        :item/width (round width) :item/height (round height)}
-                (finite? ink) (assoc :item/ink (round ink 3)))))
+                (finite? ink) (assoc :item/ink (round ink 3))
+                pattern (assoc :item/pattern pattern))))
 
 (defn image-item
   "A raster whose pixels are somewhere else.
@@ -197,14 +198,19 @@
   optional: without one a path cannot be clipped to the page, cannot be laid
   out by a consumer, and cannot be told apart from a mark that is nowhere.
   Every other kind has an extent and this one needs the same."
-  [{:keys [d fill stroke stroke-width x y width height]}]
+  [{:keys [d fill stroke stroke-width x y width height pattern]}]
   (item :path (cond-> {:item/d (str d)
                        :item/x (round x) :item/y (round y)
                        :item/width (round width) :item/height (round height)}
                 (finite? fill) (assoc :item/fill (round fill 3))
                 (finite? stroke) (assoc :item/stroke (round stroke 3))
                 (finite? stroke-width) (assoc :item/stroke-width
-                                              (round stroke-width 2)))))
+                                              (round stroke-width 2))
+                ;; The fill is a PATTERN, not a colour. Present only when it
+                ;; is, so a drawer can say so rather than showing whatever
+                ;; colour happened to be set — which is what a reader who
+                ;; leaves it out ends up doing.
+                pattern (assoc :item/pattern pattern))))
 
 (defn frame-item
   "A region whose contents are not decoded — see `item-kinds`."

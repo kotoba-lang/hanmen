@@ -382,9 +382,23 @@
   {:font nil :size 0.0 :char-spacing 0.0 :word-spacing 0.0
    :horizontal 1.0 :leading 0.0 :rise 0.0 :render-mode 0})
 
+(defn- resources-of [objs dict]
+  (pdf/resolve-ref objs (:Resources dict)))
+
+(defn- ink-of
+  "Ink from a grey, scaled by a constant alpha.
+
+  Exact for one layer on paper — 50% of black ink is grey — and an
+  approximation the moment marks overlap. `apply-ext-gstate` says why that
+  trade is taken."
+  ([grey] (ink-of grey nil))
+  ([grey alpha]
+   (when (number? grey)
+     (* (- 1.0 grey) (double (or alpha 1.0))))))
+
 (defn- run-of
   "One string operand, placed, as either a text item or a frame."
-  [{:keys [text-state ctm tm fonts] grey :gray} chars]
+  [{:keys [text-state ctm tm fonts] grey :gray alpha :fill-alpha} chars]
   (let [{:keys [font size char-spacing word-spacing horizontal rise render-mode]} text-state
         fd (get fonts font)
         composite? (boolean (:composite? fd))
@@ -436,7 +450,7 @@
                    ;; Nil when no colour operator has run, which per the
                    ;; spec means black — `hanmen.svg` reads an absent ink
                    ;; as full.
-                   :ink (when (number? grey) (- 1.0 grey))
+                   :ink (ink-of grey alpha)
                    :direction (when (= render-mode 3) :invisible)})
                  ;; Where the pen ends up, in reader space. Not part of the
                  ;; model — `coalesce` strips both of these — but the exact
@@ -610,8 +624,6 @@
 (def ^:private fills #{"f" "F" "f*" "b" "b*" "B" "B*"})
 (def ^:private strokes #{"S" "s" "b" "b*" "B" "B*"})
 
-(defn- ink-of [grey] (when (number? grey) (- 1.0 grey)))
-
 (defn- paint
   "A painting operator: what the accumulated path becomes, and the state
   with that path cleared.
@@ -649,20 +661,71 @@
 
        (and only-rects? fill?)
        (mapv (fn [[x y w h]]
-               (page/rule-item {:x x :y y :width w :height h
-                                :ink (ink-of (:gray state))}))
+               (page/rule-item (cond-> {:x x :y y :width w :height h
+                                        :ink (ink-of (:gray state)
+                                                     (:fill-alpha state))}
+                                 (:fill-pattern state)
+                                 (assoc :pattern (:fill-pattern state)))))
              rects)
 
        (and (seq segs) bx0)
-       [(page/path-item {:d (str/join " " segs)
-                         :x bx0 :y by0
-                         :width (- bx1 bx0) :height (- by1 by0)
-                         :fill (when fill? (ink-of (:gray state)))
-                         :stroke (when stroke? (or (ink-of (:stroke-gray state))
-                                                   (ink-of (:gray state))))
-                         :stroke-width (when stroke? (:line-width state))})]
+       [(page/path-item (cond-> {:d (str/join " " segs)
+                                 :x bx0 :y by0
+                                 :width (- bx1 bx0) :height (- by1 by0)
+                                 :fill (when fill? (ink-of (:gray state)
+                                                           (:fill-alpha state)))
+                                 :stroke (when stroke?
+                                           (or (ink-of (:stroke-gray state)
+                                                       (:stroke-alpha state))
+                                               (ink-of (:gray state)
+                                                       (:stroke-alpha state))))
+                                 :stroke-width (when stroke? (:line-width state))}
+                          (and fill? (:fill-pattern state))
+                          (assoc :pattern (:fill-pattern state))))]
 
        :else []))}))
+
+(defn- pattern-kind
+  "Which kind of pattern a name stands for, for marking a fill that uses it.
+
+  Tiling (type 1) is all the corpus has — 34 of them, and no shading
+  patterns at all. A tiling pattern is a content stream repeated over the
+  region, and running it would mean deciding how many times: a 2pt tile over
+  a page is thousands of copies. Marking the fill is the honest answer until
+  something needs more."
+  [objs state name]
+  (let [res (resources-of objs (:page-dict state))
+        pt (pdf/resolve-ref objs (get (pdf/resolve-ref objs (:Pattern res))
+                                      (keyword name)))
+        d (or (:dict pt) pt)]
+    (case (long (or (pdf/resolve-ref objs (:PatternType d)) 0))
+      1 :tiling
+      2 :shading
+      :unknown)))
+
+(defn- apply-ext-gstate
+  "`/ExtGState /<name>`, as far as this understands it.
+
+  `/ca` and `/CA` are constant alpha for fills and strokes. They multiply
+  into ink rather than becoming a separate channel, and that is exact for a
+  single layer on paper: 50% of black ink IS grey. It stops being exact once
+  things overlap, which is what a real compositor is for and what this is
+  not — said here so the approximation is a decision.
+
+  `/LW` is a line width in user space, like `w`. `/BM`, `/SMask` and the
+  rest are not read: measured at zero occurrences across the corpus, and a
+  soft mask nobody can test is a soft mask nobody should trust."
+  [objs state name]
+  (let [res (resources-of objs (:page-dict state))
+        gs (pdf/resolve-ref objs (get (pdf/resolve-ref objs (:ExtGState res))
+                                      (keyword name)))]
+    (if-not (map? gs)
+      state
+      (cond-> state
+        (number? (:ca gs)) (assoc :fill-alpha (double (:ca gs)))
+        (number? (:CA gs)) (assoc :stroke-alpha (double (:CA gs)))
+        (number? (:LW gs)) (assoc :line-width
+                                  (* (double (:LW gs)) (y-scale (:ctm state))))))))
 
 (defn- number-operands [stack]
   (into [] (comp (filter #(= :num (first %))) (map second)) stack))
@@ -689,9 +752,6 @@
   (let [f (pdf/resolve-ref objs (:Filter (:dict xo)))
         fs (cond (nil? f) [] (keyword? f) [f] (vector? f) f :else [])]
     (when (some #{:DCTDecode} fs) "image/jpeg")))
-
-(defn- resources-of [objs dict]
-  (pdf/resolve-ref objs (:Resources dict)))
 
 (declare run-content)
 
@@ -738,6 +798,13 @@
             ;; a reader that only looked in the form would silently place its
             ;; text at size zero.
             child (assoc state
+                         ;; The form's OWN resources for `gs` and `scn`, not
+                         ;; the page's. A form that names /G1 means its own
+                         ;; /G1, and looking up the page's is how a stamp
+                         ;; ends up drawn at the alpha of whatever the page
+                         ;; happened to call G1.
+                         :page-dict {:Resources (merge (or (resources-of objs (:page-dict state)) {})
+                                                       res)}
                          :ctm (mul matrix (:ctm state))
                          :fonts (merge (:fonts state)
                                        (or (font-table objs {:Resources res}) {}))
@@ -794,7 +861,9 @@
                 "q" (recur rest-tokens []
                            (update state :gs conj
                                    (select-keys state [:ctm :gray :stroke-gray
-                                                       :line-width :clip]))
+                                                       :line-width :clip
+                                                       :fill-alpha :stroke-alpha
+                                                       :fill-pattern]))
                            items)
                 "Q" (let [top (peek (:gs state))]
                       (recur rest-tokens []
@@ -804,7 +873,8 @@
                                  ;; key to ABSENT, so a clip set inside the
                                  ;; q/Q pair would survive a restore that
                                  ;; had none.
-                                 (dissoc :clip :stroke-gray :line-width)
+                                 (dissoc :clip :line-width
+                                         :fill-alpha :stroke-alpha :fill-pattern)
                                  (merge (or top {})))
                              items))
                 "cm" (recur rest-tokens []
@@ -939,12 +1009,33 @@
                 ;; STROKE colour. Treating them as one is how a hairline
                 ;; table border ends up the colour of the cell behind it.
                 ("g" "rg" "k" "sc" "scn")
-                (recur rest-tokens [] (assoc state :gray (fill-grey nums (:gray state)))
+                (recur rest-tokens []
+                       (-> state
+                           (assoc :gray (fill-grey nums (:gray state)))
+                           ;; `scn` with a NAME is a pattern, not a colour.
+                           ;; Leaving the previous colour — which is what
+                           ;; happened before — fills the shape in whatever
+                           ;; was last set, which is an arbitrary colour
+                           ;; presented as the document's. Marked instead.
+                           (as-> st (if (and (= value "scn") (seq names))
+                                      (assoc st :fill-pattern
+                                             (pattern-kind objs st (last names)))
+                                      (dissoc st :fill-pattern))))
                        items)
                 ("G" "RG" "K" "SC" "SCN")
                 (recur rest-tokens []
                        (assoc state :stroke-gray (fill-grey nums (:stroke-gray state)))
                        items)
+                ;; `gs` — the graphics state a name stands for. Ignored
+                ;; entirely until now, and it is the most common operator in
+                ;; the corpus after the drawing ones: 1,100 calls across 86
+                ;; documents, 217 of them setting a stroke alpha below 1. A
+                ;; 30%-alpha hairline drawn at full ink is a black line
+                ;; where the document has a grey one.
+                "gs" (recur rest-tokens []
+                            (apply-ext-gstate objs state (last names))
+                            items)
+
                 "w" (recur rest-tokens []
                            (assoc state :line-width
                                   (* (double (or (last nums) 1.0)) (y-scale (:ctm state))))
@@ -1101,9 +1192,18 @@
                objs
                (pdf/page-content-str objs page-dict)
                {:ctm base :gs [] :text-state initial-text-state
-                :tm identity-matrix :tlm identity-matrix :gray nil
+                :tm identity-matrix :tlm identity-matrix
+                ;; PDF's initial colour is BLACK, for fill and for stroke.
+                ;; Starting at nil made "no colour operator yet" and "a
+                ;; colour this cannot read" the same value, and it lost
+                ;; every constant alpha set before the first colour — which
+                ;; is most of them, because `gs` usually comes first.
+                :gray 0.0 :stroke-gray 0.0
                 :fonts (or (font-table objs page-dict cid->unicode) {})
-                :xobjects (or (pdf/resolve-ref objs (:XObject res)) {})}
+                :xobjects (or (pdf/resolve-ref objs (:XObject res)) {})
+                ;; Kept so `gs` and `scn` can reach /ExtGState and /Pattern,
+                ;; which live in the resources rather than the stream.
+                :page-dict page-dict}
                0 #{} images)]
     {:items (coalesce (on-page items width height)) :width width :height height
      :rotation rotation :image-refs @images})))

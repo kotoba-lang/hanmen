@@ -467,6 +467,63 @@
     (is (= 1 (count rules)) "the straddler stays whole, the far one goes")
     (is (= 90.0 (:item/x (first rules))))))
 
+(defn- gs-doc
+  "A page whose /ExtGState carries `entries`, drawing `content`."
+  [entries content]
+  (let [text (str "%PDF-1.4\n"
+                  "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+                  "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+                  "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] "
+                  "/Resources << /ExtGState << /G1 " entries " >> "
+                  "/Pattern << /P1 << /PatternType 1 /PaintType 1 >> >> "
+                  "/Font << /F1 7 0 R >> >> /Contents 4 0 R >>\nendobj\n"
+                  "4 0 obj\n<< /Length 80 >>\nstream\n" content
+                  "\nendstream\nendobj\n"
+                  "7 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+                  "trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n")]
+    (pdf/parse (mapv #(bit-and (int %) 0xff)
+                     #?(:clj (.getBytes ^String text "ISO-8859-1")
+                        :cljs (map #(.charCodeAt text %) (range (count text))))))))
+
+(deftest ext-gstate-alpha-reaches-the-ink
+  ;; `gs` was ignored entirely, and it is the most common operator in the
+  ;; corpus after the drawing ones — 1,100 calls, 217 setting a stroke alpha
+  ;; below 1. A 30%-alpha hairline at full ink is a black line where the
+  ;; document has a grey one.
+  (testing "fill alpha"
+    (let [p (hpdf/page-at (gs-doc "<< /ca 0.5 >>"
+                                  "/G1 gs 0 g 10 10 20 20 re f") 0)
+          [r] (filterv #(= :rule (:item/kind %)) (:page/items p))]
+      (is (= 0.5 (:item/ink r)) "black at half alpha is half ink")))
+
+  (testing "stroke alpha, separately"
+    (let [p (hpdf/page-at (gs-doc "<< /CA 0.25 >>"
+                                  "/G1 gs 0 G 10 10 m 100 10 l S") 0)
+          [path] (filterv #(= :path (:item/kind %)) (:page/items p))]
+      (is (= 0.25 (:item/stroke path)))))
+
+  (testing "and text takes the fill alpha too"
+    (let [p (hpdf/page-at (gs-doc "<< /ca 0.5 >>"
+                                  "/G1 gs 0 g BT /F1 10 Tf 1 0 0 1 5 50 Tm (x) Tj ET") 0)
+          [t] (filterv #(= :text (:item/kind %)) (:page/items p))]
+      (is (= 0.5 (:item/ink t)))))
+
+  (testing "and Q restores it"
+    ;; Alpha is graphics state. A `Q` that left it set would fade the rest
+    ;; of the page.
+    (let [p (hpdf/page-at (gs-doc "<< /ca 0.2 >>"
+                                  "q /G1 gs Q 0 g 10 10 20 20 re f") 0)
+          [r] (filterv #(= :rule (:item/kind %)) (:page/items p))]
+      (is (= 1.0 (:item/ink r))))))
+
+(deftest a-patterned-fill-says-it-is-one
+  ;; Before this, `scn` with a name left the previous colour, so the shape
+  ;; was filled in whatever was last set — an arbitrary colour presented as
+  ;; the document's.
+  (let [p (hpdf/page-at (gs-doc "<< >>" "0 g /Pattern cs /P1 scn 10 10 20 20 re f") 0)
+        [r] (filterv #(= :rule (:item/kind %)) (:page/items p))]
+    (is (= :tiling (:item/pattern r)))))
+
 ;; ── XObjects ─────────────────────────────────────────────────────────────────
 
 (defn- xobject-doc

@@ -268,6 +268,21 @@
     (is (page/scanned? p))
     (is (zero? (page/text-chars p)))))
 
+(deftest bytes-that-are-not-a-pdf-have-no-pages-rather-than-one-blank-one
+  ;; `pdf.core/pages` walks from a nil root into its `:else` branch and hands
+  ;; back `[{}]` — one empty map, which counts as a page. A viewer that
+  ;; believed it drew a blank sheet, and a reader went looking for the
+  ;; missing content of a document that was never there.
+  (let [parsed (pdf/parse (mapv #(bit-and (int %) 0xff)
+                                (.getBytes "this is not a PDF at all" "UTF-8")))]
+    (is (= 1 (count (pdf/pages parsed))) "what the object model reports")
+    (is (zero? (hpdf/page-count parsed)) "and what a page actually is")
+    (is (nil? (hpdf/page-at parsed 0))))
+  (testing "a real document's blank page is still a page"
+    (let [d (hpdf/read-document (pdf/write-document
+                                 [{:width 200 :height 100 :content ""}]))]
+      (is (= 1 (:document/count d))))))
+
 (deftest an-unreadable-stream-is-a-page-with-no-marks-not-a-throw
   ;; A viewer that threw here would take the whole document down over one
   ;; page it could not read.

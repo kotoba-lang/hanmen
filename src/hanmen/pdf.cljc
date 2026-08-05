@@ -563,11 +563,32 @@
 
 ;; ── the public shape ─────────────────────────────────────────────────────────
 
+(defn page-dicts
+  "`pdf.core/pages`, minus the one it invents for a file that is not a PDF.
+
+  `collect-pages` walks from `(:Pages (:root parsed))`, and when the root is
+  nil — no catalog, no trailer, because the bytes were never a PDF — its
+  `:else` branch returns `[{}]`. One empty map, which counts as one page.
+  Measured: a text file uploaded as `application/pdf` reported a page and
+  rendered blank, which is the answer that sends somebody looking for the
+  missing content of a document that was never there.
+
+  A page dict says it is one, or carries content, or carries a box. A blank
+  page of a real document has the last two even with no content stream, so
+  this drops the phantom without dropping a legitimately empty page."
+  [parsed]
+  (into [] (filter (fn [d]
+                     (and (map? d)
+                          (or (= :Page (:Type d))
+                              (contains? d :Contents)
+                              (contains? d :MediaBox)))))
+        (pdf/pages parsed)))
+
 (defn page-at
   "Page `index` of `parsed`, as a `hanmen.page` value."
   [parsed index]
   (let [objs (:objects parsed)
-        dicts (pdf/pages parsed)
+        dicts (page-dicts parsed)
         dict (nth dicts index nil)]
     (when dict
       (let [{:keys [items width height rotation]} (walk objs dict)]
@@ -582,7 +603,7 @@
   library's: nothing here opens anything."
   [bytes]
   (let [parsed (pdf/parse bytes)
-        n (count (pdf/pages parsed))]
+        n (count (page-dicts parsed))]
     (page/document (keep #(page-at parsed %) (range n)))))
 
-(defn page-count [parsed] (count (pdf/pages parsed)))
+(defn page-count [parsed] (count (page-dicts parsed)))

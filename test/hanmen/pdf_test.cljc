@@ -399,6 +399,39 @@
   (let [p (page-of "0 g 10 10 m 100 100 l n")]
     (is (empty? (filterv #(= :path (:item/kind %)) (:page/items p))))))
 
+(deftest a-clip-hides-what-the-document-hides
+  ;; `W n` is the idiom: mark the path as the clip, then end it without
+  ;; painting. A reader that ignored it draws content the document does not
+  ;; show — a caption from under a cropped figure, a row from a table that
+  ;; was scrolled.
+  (let [p (page-of (str "q 0 700 100 100 re W n "
+                        "BT /F1 10 Tf 1 0 0 1 10 750 Tm (inside) Tj "
+                        "1 0 0 1 400 750 Tm (outside) Tj ET Q"))]
+    (is (= ["inside"] (page/text-of p))))
+
+  (testing "and Q puts the clip back"
+    ;; `merge` cannot restore a key to absent, so a clip set inside the pair
+    ;; would otherwise survive the restore and swallow the rest of the page.
+    (let [p (page-of (str "q 0 700 100 100 re W n Q "
+                          "BT /F1 10 Tf 1 0 0 1 400 750 Tm (after) Tj ET"))]
+      (is (= ["after"] (page/text-of p)))))
+
+  (testing "and a clip is intersected, never widened"
+    (let [p (page-of (str "q 0 600 300 300 re W n 0 600 100 100 re W n "
+                          "BT /F1 10 Tf 1 0 0 1 10 650 Tm (in) Tj "
+                          "1 0 0 1 200 650 Tm (out) Tj ET Q"))]
+      (is (= ["in"] (page/text-of p))))))
+
+(deftest a-clipped-rule-is-dropped-and-a-straddling-one-is-not
+  (let [p (page-of (str "q 0 700 100 100 re W n 0 g "
+                        (pdf/rect-command {:x 400 :y 750 :width 10 :height 10
+                                           :fill? true})
+                        (pdf/rect-command {:x 90 :y 750 :width 40 :height 10
+                                           :fill? true}) " Q"))
+        rules (filterv #(= :rule (:item/kind %)) (:page/items p))]
+    (is (= 1 (count rules)) "the straddler stays whole, the far one goes")
+    (is (= 90.0 (:item/x (first rules))))))
+
 ;; ── XObjects ─────────────────────────────────────────────────────────────────
 
 (defn- xobject-doc

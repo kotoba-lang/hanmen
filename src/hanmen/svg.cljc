@@ -215,7 +215,9 @@
        (str text)])
 
     :rule
-    [:rect (cond-> {:x x :y y :width width :height height :class "hanmen-rule"}
+    [:rect (cond-> {:x x :y y :width width :height height
+                    :class (str "hanmen-rule"
+                                (when (:item/pattern item) " hanmen-rule--patterned"))}
              ;; Density, not colour — see the ns docstring. A rule with no
              ;; ink recorded draws at full strength, which is what a page
              ;; that never issued a colour operator means.
@@ -224,7 +226,9 @@
     :path
     (let [{:item/keys [d fill stroke stroke-width]} item]
       [:path (cond-> {:d d :class (str "hanmen-path"
-                                       (when-not fill " hanmen-path--unfilled"))}
+                                       (when-not fill " hanmen-path--unfilled")
+                                       (when (:item/pattern item)
+                                         " hanmen-path--patterned"))}
                ;; Painted in `currentColor` like everything else, with the
                ;; document's ink as opacity. A path with no fill needs to
                ;; say so: SVG fills a path black by default, so a stroked
@@ -303,6 +307,10 @@
        ".hanmen-rule{fill:currentColor}"
        ".hanmen-path{fill:currentColor;stroke:currentColor;stroke-opacity:0}"
        ".hanmen-path--unfilled{fill:none}"
+       ;; A patterned fill is not a colour this knows. Drawn faintly and
+       ;; named, so the shape is where the document put it and nobody
+       ;; mistakes the tint for the document's own.
+       ".hanmen-rule--patterned,.hanmen-path--patterned{fill-opacity:.15}"
        ".hanmen-image{image-rendering:auto}"
        ".hanmen-frame__box{fill:none;stroke:currentColor;stroke-opacity:.35;"
        "stroke-dasharray:4 3;stroke-width:1}"))

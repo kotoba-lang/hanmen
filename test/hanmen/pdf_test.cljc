@@ -220,13 +220,18 @@
                   "BT /F1 12 Tf 1 0 0 1 10 50 Tm <00410042> Tj ET\n"
                   "endstream\nendobj\n"
                   "5 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /KozMin "
-                  "/Encoding /Identity-H"
+                  "/DescendantFonts [9 0 R] /Encoding /Identity-H"
                   (if tounicode " /ToUnicode 6 0 R" "")
                   " >>\nendobj\n"
                   (if tounicode
                     (str "6 0 obj\n<< /Length 120 >>\nstream\n" tounicode
                          "\nendstream\nendobj\n")
                     "")
+                  ;; A descendant font that names its collection, which is
+                  ;; what a registry lookup is keyed on.
+                  "9 0 obj\n<< /Type /Font /Subtype /CIDFontType0 "
+                  "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) "
+                  "/Supplement 6 >> >>\nendobj\n"
                   "trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n")]
     (pdf/parse (mapv #(bit-and (int %) 0xff)
                      #?(:clj (.getBytes ^String text "ISO-8859-1")
@@ -264,6 +269,36 @@
                          "beginbfrange\n<0041> <0042> [<0041> <005A>]\nendbfrange")
                         [0x41 0x42])))))
 
+(deftest a-registry-table-reads-a-font-that-shipped-no-tounicode
+  ;; The 25-of-576 case: a CIDFontType0C with no /ToUnicode. The collection
+  ;; publishes what its CIDs mean, and a host that has the table passes it
+  ;; in — this library reads no files and has no classpath of its own.
+  (let [p (hpdf/page-at (composite-doc nil) 0
+                        {:cid->unicode (fn [ordering]
+                                         (when (= "Adobe-Japan1" ordering)
+                                           {0x41 "契" 0x42 "約"}))})
+        [t] (texts p)]
+    ;; The fixture declares Adobe-Japan1 below; without that declaration the
+    ;; resolver is never asked, which is the next assertion.
+    (is (= "契約" (:item/text t)))
+    (is (empty? (filterv #(= :frame (:item/kind %)) (:page/items p)))))
+
+  (testing "a resolver that does not know the ordering changes nothing"
+    (let [p (hpdf/page-at (composite-doc nil) 0
+                          {:cid->unicode (constantly nil)})]
+      (is (empty? (texts p)))
+      (is (= :font/no-tounicode (:item/reason (first (:page/items p)))))))
+
+  (testing "and /ToUnicode still wins when the font ships one"
+    ;; What the producer SAID beats what the collection says: a font may
+    ;; subset a collection privately, and then the table is wrong.
+    (let [p (hpdf/page-at (composite-doc (str "begincmap\n1 beginbfchar\n"
+                                              "<0041> <5951>\nendbfchar\nendcmap"))
+                          0
+                          {:cid->unicode (constantly {0x41 "X" 0x42 "Y"})})]
+      (is (= "契" (:item/text (first (texts p))))
+          "the font's own statement, not the collection's"))))
+
 (deftest a-composite-run-with-no-tounicode-is-a-frame-not-mojibake
   ;; Text nobody can read is worse than a marked region: it goes into search
   ;; results and into anything that quotes the page.
@@ -275,7 +310,7 @@
     ;; The label names the font AND what kind of file is embedded, because
     ;; that is what decides which decoder is missing: a bare CFF has no
     ;; cmap to read and needs a registry CMap resource instead.
-    (is (= "KozMin (none)" (:item/label f)))
+    (is (= "KozMin (Adobe-Japan1, none)" (:item/label f)))
     (is (page/scanned? p) "and the page says a search cannot see it")))
 
 (deftest every-fill-colour-operator-records-ink

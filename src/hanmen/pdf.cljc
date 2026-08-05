@@ -274,11 +274,18 @@
 (defn font-table
   "The page's `/Resources /Font`, as name → what a run needs to know.
 
+  `cid->unicode` is the caller's resolver: `(fn [ordering] {cid \"str\"})` or
+  nil. It is INJECTED rather than looked up because a registry table is a
+  megabyte of resource on somebody's classpath, and this library reads no
+  files and has no classpath of its own. `kotoba-lang/com-adobe-cmap` is the
+  one that has them; a host wires it in the same way it wires `:image-href`.
+
   `:widths` is code → glyph-space width; absent when the font did not ship
   one. `:composite?` and `:to-unicode` decide whether a `/Type0` run can be
   read at all."
-  [objs page-dict]
-  (let [res (pdf/resolve-ref objs (:Resources page-dict))
+  ([objs page-dict] (font-table objs page-dict nil))
+  ([objs page-dict cid->unicode]
+   (let [res (pdf/resolve-ref objs (:Resources page-dict))
         fonts (pdf/resolve-ref objs (:Font res))]
     (when (map? fonts)
       (into {}
@@ -286,6 +293,17 @@
                     (let [fd (pdf/resolve-ref objs v)]
                       (when (map? fd)
                         (let [subtype (:Subtype fd)
+                              ordering (when (= subtype :Type0)
+                                         (let [desc (pdf/resolve-ref
+                                                     objs (first (pdf/resolve-ref
+                                                                  objs (:DescendantFonts fd))))
+                                               csi (pdf/resolve-ref objs (:CIDSystemInfo desc))]
+                                           (when (map? csi)
+                                             (let [reg (pdf/resolve-ref objs (:Registry csi))
+                                                   ord (pdf/resolve-ref objs (:Ordering csi))]
+                                               (when (and reg ord)
+                                                 (str (apply str (map char reg)) "-"
+                                                      (apply str (map char ord))))))))
                               first-char (pdf/resolve-ref objs (:FirstChar fd))
                               widths (pdf/resolve-ref objs (:Widths fd))
                               tu (pdf/resolve-ref objs (:ToUnicode fd))
@@ -301,18 +319,18 @@
                             ;; `:embedded` says which kind of font file is
                             ;; there, because that decides WHICH decoder is
                             ;; missing — see the ns docstring.
-                            :ordering (when (= subtype :Type0)
-                                        (let [desc (first (pdf/resolve-ref
-                                                           objs (:DescendantFonts fd)))
-                                              desc (pdf/resolve-ref objs desc)
-                                              csi (pdf/resolve-ref objs (:CIDSystemInfo desc))]
-                                          (when (map? csi)
-                                            (let [reg (pdf/resolve-ref objs (:Registry csi))
-                                                  ord (pdf/resolve-ref objs (:Ordering csi))]
-                                              (when (and reg ord)
-                                                (str (apply str (map char reg)) "-"
-                                                     (apply str (map char ord))))))))
-                            :to-unicode tu-map
+                            :ordering ordering
+                            ;; `/ToUnicode` first: it is what the producer
+                            ;; SAID the codes mean. The registry table is
+                            ;; what the COLLECTION says, which is right for
+                            ;; every font that uses the collection properly
+                            ;; and wrong for one that subsets it privately —
+                            ;; so it is the fallback and never the override.
+                            :to-unicode (or tu-map
+                                            (when (and cid->unicode ordering)
+                                              (cid->unicode ordering)))
+                            :to-unicode-source (cond tu-map :tounicode
+                                                     (and cid->unicode ordering) :registry)
                             :embedded (when (= subtype :Type0)
                                         (let [d (pdf/resolve-ref
                                                  objs (first (pdf/resolve-ref
@@ -333,7 +351,7 @@
                                                  (when (number? w)
                                                    [(+ (long first-char) i) (double w)]))))
                                             widths))}]))))
-                  fonts)))))
+                  fonts))))))
 
 (def ^:private default-width
   "What a code is worth when the font did not say.
@@ -1073,7 +1091,8 @@
 
   The page's own `/Resources` seed the state; a form XObject reached from here
   gets its own, merged over these — see `do-xobject`."
-  [objs page-dict]
+  ([objs page-dict] (walk objs page-dict nil))
+  ([objs page-dict {:keys [cid->unicode]}]
   (let [rotation (or (pdf/resolve-ref objs (:Rotate page-dict)) 0)
         {base :matrix :keys [width height]} (flip (media-box objs page-dict) rotation)
         res (resources-of objs page-dict)
@@ -1083,11 +1102,11 @@
                (pdf/page-content-str objs page-dict)
                {:ctm base :gs [] :text-state initial-text-state
                 :tm identity-matrix :tlm identity-matrix :gray nil
-                :fonts (or (font-table objs page-dict) {})
+                :fonts (or (font-table objs page-dict cid->unicode) {})
                 :xobjects (or (pdf/resolve-ref objs (:XObject res)) {})}
                0 #{} images)]
     {:items (coalesce (on-page items width height)) :width width :height height
-     :rotation rotation :image-refs @images}))
+     :rotation rotation :image-refs @images})))
 
 ;; ── the public shape ─────────────────────────────────────────────────────────
 
@@ -1113,15 +1132,20 @@
         (pdf/pages parsed)))
 
 (defn page-at
-  "Page `index` of `parsed`, as a `hanmen.page` value."
-  [parsed index]
+  "Page `index` of `parsed`, as a `hanmen.page` value.
+
+  `opts` may carry `:cid->unicode` — see `font-table`. Without it a composite
+  font with no `/ToUnicode` stays a `:frame`, which is what this did before
+  the option existed."
+  ([parsed index] (page-at parsed index nil))
+  ([parsed index opts]
   (let [objs (:objects parsed)
         dicts (page-dicts parsed)
         dict (nth dicts index nil)]
     (when dict
-      (let [{:keys [items width height rotation]} (walk objs dict)]
+      (let [{:keys [items width height rotation]} (walk objs dict opts)]
         (page/page {:index index :width width :height height
-                    :rotation rotation :items items})))))
+                    :rotation rotation :items items}))))))
 
 (defn- colorspace-name [cs]
   (case cs

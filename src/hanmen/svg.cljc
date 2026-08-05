@@ -49,7 +49,7 @@
   "Every element this may emit. `foreignObject` is absent for the obvious
   reason and `style` for the less obvious one: a stylesheet in the fragment
   would be a second place styling is decided, and the host's is the only one."
-  #{"svg" "g" "rect" "text" "path" "image" "title" "desc"})
+  #{"svg" "g" "rect" "text" "path" "image" "defs" "clipPath" "title" "desc"})
 
 (def allowed-attributes
   "Per element, so that `href` cannot appear on `text` by a typo or on `svg`
@@ -65,7 +65,13 @@
   that a property rather than a convention."
   {"svg" #{"viewBox" "width" "height" "class" "role" "aria-label"
            "preserveAspectRatio" "xmlns"}
-   "g" #{"class" "transform"}
+   ;; `clip-path` is the second URL in the file and the narrower of the two:
+   ;; `url(#…)` is a reference INTO this document, resolved without a
+   ;; request, and `clip-ref` builds it from an integer this namespace
+   ;; generated. There is no form of it that can name anything outside.
+   "g" #{"class" "transform" "clip-path"}
+   "defs" #{}
+   "clipPath" #{"id" "clip-path" "clipPathUnits"}
    "rect" #{"x" "y" "width" "height" "class" "fill-opacity"}
    "text" #{"x" "y" "class" "font-size" "textLength" "lengthAdjust"
             "fill-opacity" "xml:space"}
@@ -250,6 +256,47 @@
 
 ;; ── the page ─────────────────────────────────────────────────────────────────
 
+(defn- clip-id
+  "The id for clip `n`. Prefixed, because a page's fragment may sit in a
+  document that has ids of its own and `#3` is a collision waiting to be
+  somebody else's bug."
+  [n]
+  (str "hanmen-clip-" n))
+
+(defn- clip-ref [n] (str "url(#" (clip-id n) ")"))
+
+(defn- emit-clips
+  "The clip definitions, as `<defs>`, or nil when there are none.
+
+  Each points at the one it narrows through its own `clip-path`, because
+  two paths inside one `clipPath` are UNIONED — the opposite of what a
+  document that clipped twice meant. Nesting is how SVG intersects."
+  [clips]
+  (when (seq clips)
+    (into [:defs {}]
+          (map (fn [{:clip/keys [id d parent]}]
+                 [:clipPath (cond-> {:id (clip-id id)}
+                              (some? parent) (assoc :clip-path (clip-ref parent)))
+                  [:path {:d d :class "hanmen-clip"}]]))
+          clips)))
+
+(defn- grouped
+  "Marks wrapped in a `<g clip-path>` per run that shares a clip.
+
+  Per RUN and not per clip: marks arrive in painting order and a clip turns
+  on and off between them, so gathering all of one clip's marks together
+  would reorder the page. Painting order is the one thing a page cannot
+  lose."
+  [items image-href]
+  (into []
+        (map (fn [group]
+               (let [c (:item/clip (first group))
+                     drawn (map #(emit-item % image-href) group)]
+                 (if (some? c)
+                   (into [:g {:class "hanmen-clipped" :clip-path (clip-ref c)}] drawn)
+                   (into [:g {:class "hanmen-marks"}] drawn)))))
+        (partition-by :item/clip items)))
+
 (defn emit
   "A page as an SVG fragment, in hiccup.
 
@@ -275,9 +322,9 @@
             ;; forty graphics is a document nobody can navigate.
             :aria-label (str (or label (str "Page " (inc (or index 0))))
                              (when (page/scanned? p) " (scanned — no text)"))}
+      (emit-clips (:page/clips p))
       (into [:g {:class "hanmen-page__marks"}]
-            (map #(emit-item % (:image-href opts)))
-            items)])))
+            (grouped items (:image-href opts)))])))
 
 (defn ->svg
   "A page as an SVG string, allowlist-enforced."
@@ -307,6 +354,8 @@
        ".hanmen-rule{fill:currentColor}"
        ".hanmen-path{fill:currentColor;stroke:currentColor;stroke-opacity:0}"
        ".hanmen-path--unfilled{fill:none}"
+       ;; A clip path is never painted — it exists to shape what is.
+       ".hanmen-clip{fill:none;stroke:none}"
        ;; A patterned fill is not a colour this knows. Drawn faintly and
        ;; named, so the shape is where the document put it and nobody
        ;; mistakes the tint for the document's own.

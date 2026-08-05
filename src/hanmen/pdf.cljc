@@ -665,10 +665,29 @@
         ;; The clip narrows on the way in and never widens: PDF intersects,
         ;; so a `q`/`Q` pair is the only thing that puts it back. Tracked as
         ;; a BOX rather than the path itself — see `clip-box`.
-        state (if (:pending-clip? state)
-                (-> state (dissoc :pending-clip?)
-                    (assoc :clip (intersect-box (:clip state) (:bounds state))))
-                state)
+        state (if (and (:pending-clip? state) (seq (:path state)))
+                (let [d (str/join " " (:path state))
+                      ;; Deduplicated on the path AND the clip it narrows: a
+                      ;; document that sets the same clip a hundred times —
+                      ;; which is what a table of clipped cells looks like —
+                      ;; should not produce a hundred identical definitions,
+                      ;; and the same path under two different parents is
+                      ;; two different regions.
+                      key* [d (:clip-id state)]
+                      reg (:clips state)
+                      known (get (:index @reg) key*)
+                      id (or known (count (:index @reg)))]
+                  (when (nil? known)
+                    (swap! reg #(-> %
+                                    (update :index assoc key* id)
+                                    (update :defs conj
+                                            (page/clip {:id id :d d
+                                                        :parent (:clip-id state)})))))
+                  (-> state
+                      (dissoc :pending-clip?)
+                      (assoc :clip (intersect-box (:clip state) (:bounds state))
+                             :clip-id id)))
+                (dissoc state :pending-clip?))
         rects (:rects state)
         segs (:path state)
         only-rects? (and (seq rects)
@@ -678,9 +697,10 @@
         cleared (dissoc state :path :rects :point :subpath-start :bounds)]
     {:state cleared
      :items*
-     (remove-outside-clip
-      clip
-      (cond
+     (mapv #(cond-> % (:clip-id state) (assoc :item/clip (:clip-id state)))
+      (remove-outside-clip
+       clip
+       (cond
        (not (or fill? stroke?)) []
 
        (and only-rects? fill?)
@@ -707,7 +727,7 @@
                           (and fill? (:fill-pattern state))
                           (assoc :pattern (:fill-pattern state))))]
 
-       :else []))}))
+       :else [])))}))
 
 (defn- pattern-kind
   "Which kind of pattern a name stands for, for marking a fill that uses it.
@@ -874,8 +894,9 @@
                              ;; document does not show, and showing it puts
                              ;; a stray line across the page.
                              (when (and item (not (and (:clip state)
-                                                       (outside-box? (:clip state) item))))
-                               item)]))]
+                                                        (outside-box? (:clip state) item))))
+                               (cond-> item
+                                 (:clip-id state) (assoc :item/clip (:clip-id state))))]))]
               (case value
                 ;; The whole graphics state, not just the matrix. Colour,
                 ;; line width and the CLIP are all part of it — a `Q` that
@@ -887,7 +908,7 @@
                                    (select-keys state [:ctm :gray :stroke-gray
                                                        :line-width :clip
                                                        :fill-alpha :stroke-alpha
-                                                       :fill-pattern]))
+                                                       :fill-pattern :clip-id]))
                            items)
                 "Q" (let [top (peek (:gs state))]
                       (recur rest-tokens []
@@ -897,7 +918,7 @@
                                  ;; key to ABSENT, so a clip set inside the
                                  ;; q/Q pair would survive a restore that
                                  ;; had none.
-                                 (dissoc :clip :line-width
+                                 (dissoc :clip :line-width :clip-id
                                          :fill-alpha :stroke-alpha :fill-pattern)
                                  (merge (or top {})))
                              items))
@@ -1068,9 +1089,12 @@
                 "Do" (recur rest-tokens [] state
                             (if-let [nm (last names)]
                               (reduce conj! items
-                                      (remove-outside-clip
-                                       (:clip state)
-                                       (do-xobject objs state nm depth seen images)))
+                                      (mapv #(cond-> %
+                                               (:clip-id state)
+                                               (assoc :item/clip (:clip-id state)))
+                                            (remove-outside-clip
+                                             (:clip state)
+                                             (do-xobject objs state nm depth seen images))))
                               items))
 
                 ;; Everything else — paths, clipping, colour spaces, marked
@@ -1212,6 +1236,7 @@
         {base :matrix :keys [width height]} (flip (media-box objs page-dict) rotation)
         res (resources-of objs page-dict)
         images (atom [])
+        clips (atom {:index {} :defs []})
         items (run-content
                objs
                (pdf/page-content-str objs page-dict)
@@ -1227,10 +1252,11 @@
                 :xobjects (or (pdf/resolve-ref objs (:XObject res)) {})
                 ;; Kept so `gs` and `scn` can reach /ExtGState and /Pattern,
                 ;; which live in the resources rather than the stream.
-                :page-dict page-dict}
+                :page-dict page-dict
+                :clips clips}
                0 #{} images)]
     {:items (coalesce (on-page items width height)) :width width :height height
-     :rotation rotation :image-refs @images})))
+     :rotation rotation :image-refs @images :clips (:defs @clips)})))
 
 ;; ── the public shape ─────────────────────────────────────────────────────────
 
@@ -1268,9 +1294,9 @@
         dicts (page-dicts parsed)
         dict (nth dicts index nil)]
     (when dict
-      (let [{:keys [items width height rotation]} (walk objs dict opts)]
+      (let [{:keys [items width height rotation clips]} (walk objs dict opts)]
         (page/page {:index index :width width :height height
-                    :rotation rotation :items items}))))))
+                    :rotation rotation :items items :clips clips}))))))
 
 (defn- colorspace-name [cs]
   (case cs

@@ -83,6 +83,54 @@
                            (ex-data e)))))
           bad))))
 
+(deftest a-clip-is-a-path-and-its-url-points-into-this-document
+  ;; The second URL in the file, and the narrower of the two: `url(#…)` is a
+  ;; reference INTO this document, resolved without a request, built from an
+  ;; integer this namespace generated. There is no form of it that can name
+  ;; anything outside.
+  (let [p (page/page {:index 0 :width 100 :height 100
+                      :clips [(page/clip {:id 0 :d "M0 0 L50 0 L50 50 Z"})]
+                      :items [(assoc (page/text-item {:x 1 :y 1 :size 8 :text "in"})
+                                     :item/clip 0)]})
+        out (svg/->svg p)]
+    (is (str/includes? out "<clipPath id=\"hanmen-clip-0\">"))
+    (is (str/includes? out "<path class=\"hanmen-clip\" d=\"M0 0 L50 0 L50 50 Z\"/>"))
+    (is (str/includes? out "clip-path=\"url(#hanmen-clip-0)\""))
+    (is (nil? (re-find #"url\((?!#)" out)) "no url() that is not a fragment"))
+
+  (testing "a page with no clips emits no defs at all"
+    (is (not (str/includes? (svg/->svg (page-with (page/text-item {:x 0 :y 1 :size 8
+                                                                   :text "x"})))
+                            "<defs")))))
+
+(deftest nested-clips-point-at-each-other-rather-than-sharing-an-element
+  ;; Two paths inside one `clipPath` are UNIONED, which is the opposite of
+  ;; what a document that clipped twice meant. Nesting is how SVG
+  ;; intersects.
+  (let [out (svg/->svg
+             (page/page {:index 0 :width 100 :height 100
+                         :clips [(page/clip {:id 0 :d "M0 0 L99 0 L99 99 Z"})
+                                 (page/clip {:id 1 :d "M0 0 L9 0 L9 9 Z" :parent 0})]
+                         :items [(assoc (page/text-item {:x 1 :y 1 :size 8 :text "in"})
+                                        :item/clip 1)]}))]
+    (is (str/includes? out "<clipPath clip-path=\"url(#hanmen-clip-0)\" id=\"hanmen-clip-1\">")
+        "the inner clip is itself clipped by the outer one")
+    (is (= 1 (count (re-seq #"<clipPath id=" out))) "and the outer one is not")))
+
+(deftest painting-order-survives-the-grouping
+  ;; Marks arrive in painting order and a clip turns on and off between
+  ;; them. Gathering all of one clip's marks together would reorder the
+  ;; page, and painting order is the one thing a page cannot lose.
+  (let [it (fn [t c] (cond-> (page/text-item {:x 0 :y 1 :size 8 :text t})
+                       c (assoc :item/clip c)))
+        out (svg/->svg (page/page {:index 0 :width 10 :height 10
+                                   :clips [(page/clip {:id 0 :d "M0 0 L1 0 Z"})]
+                                   :items [(it "a" 0) (it "b" nil) (it "c" 0)]}))
+        order (mapv second (re-seq #">([abc])</text>" out))]
+    (is (= ["a" "b" "c"] order))
+    (is (= 2 (count (re-seq #"clip-path=\"url\(#hanmen-clip-0\)\"" out)))
+        "two runs under the same clip, not one group of two")))
+
 (deftest an-unknown-item-kind-is-loud
   ;; A kind added to the model without a case here would otherwise vanish
   ;; from every rendering, and a page missing a mark looks complete.

@@ -222,10 +222,28 @@
 
 ;; ── the page ─────────────────────────────────────────────────────────────────
 
+(defn clip
+  "One clip region: a path in reader space, and the clip it narrows.
+
+  A CHAIN and not a list, because PDF intersects clips and SVG unions the
+  paths inside one `clipPath`. Two rectangles in one element is the union of
+  two rectangles — the opposite of what a document that clipped twice
+  meant — so each one points at the one before it and the intersection comes
+  from the nesting."
+  [{:keys [id d parent]}]
+  (cond-> {:clip/id id :clip/d (str d)}
+    (some? parent) (assoc :clip/parent parent)))
+
 (defn page
-  "A page value. `width`/`height` are as seen — rotation already applied."
-  [{:keys [index width height rotation items label]}]
+  "A page value. `width`/`height` are as seen — rotation already applied.
+
+  `clips` are referenced by items through `:item/clip`, rather than being
+  nested in the item vector. Marks arrive in painting order and a clip may
+  turn on and off between them, so nesting would either reorder the page or
+  repeat the clip — and painting order is the one thing a page cannot lose."
+  [{:keys [index width height rotation items label clips]}]
   {:page/schema schema
+   :page/clips (vec clips)
    :page/index (or index 0)
    :page/label (or label (str "Page " (inc (or index 0))))
    :page/width (round width)

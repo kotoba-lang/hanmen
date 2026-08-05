@@ -131,12 +131,25 @@ reader that ignored it draws what the document hides — a caption from under
 a cropped figure, a row from a table that was scrolled. Measured across 47
 documents: **112 text runs the document does not show**.
 
-Tracked as a bounding box rather than the path, and the direction of that
-error is chosen: a circular clip's box keeps the corners, so this shows a
-little more than the document does. Showing slightly too much is a mark
-drawn where the document drew nothing; showing too little is a mark
-**missing**, and a reader cannot tell a missing mark from a document that
-never had one.
+The **path** is carried, not only its box. `:page/clips` holds the regions
+and each mark names the one it is under; `hanmen.svg` emits them as
+`<clipPath>` and wraps each run of marks in a `<g clip-path>`. Measured
+across 86 documents: **379 clip regions over 4,399 of 11,549 marks**.
+
+Nested clips point at each other rather than sharing an element, because two
+paths inside one `clipPath` are **unioned** — the opposite of what a document
+that clipped twice meant. Nesting is how SVG intersects.
+
+The grouping is per *run* of marks, not per clip: a clip turns on and off
+between marks, and gathering all of one clip's together would reorder the
+page. Painting order is the one thing a page cannot lose.
+
+The **box** is still tracked and still used to drop marks the clip cannot
+show, because a consumer that lays marks out itself needs an extent and
+cannot intersect a cubic. That test stays wholly-outside-only, and the
+direction of its error is chosen: showing slightly too much is a mark drawn
+where the document drew nothing; showing too little is a mark **missing**,
+and a reader cannot tell a missing mark from a document that never had one.
 
 The clip is part of the graphics state, so `q`/`Q` save and restore it —
 including restoring it to *absent*, which `merge` alone cannot do and which
@@ -258,7 +271,7 @@ clojure -M:test         # pinned git deps
 clojure -M:lint
 ```
 
-69 tests / 240 assertions. Every placement assertion is a coordinate against a
+72 tests / 249 assertions. Every placement assertion is a coordinate against a
 PDF the test wrote, not a rendering somebody looked at.
 
 Measured out of sample against 30 real PDFs: 12,584 text runs, 2,083 rules, 57

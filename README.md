@@ -204,7 +204,7 @@ why these are two functions.
 - **No shading, patterns or transparency groups.** `sh` paints the clip
   region, and the clip path is not tracked; a pattern fill leaves the
   previous colour rather than inventing an average.
-- **No CID→Unicode without `/ToUnicode`.** Measured across 160 documents and
+- **CID→Unicode without `/ToUnicode` needs a table from the host.** Measured across 160 documents and
   576 `/Type0` fonts: 549 ship one and are read; 25 do not and are
   `CIDFontType0C`; 2 have no embedded font; **zero** are the SFNT case an
   embedded-`cmap` fallback would have fixed. Bare CFF has no `cmap` table, so
@@ -227,7 +227,7 @@ clojure -M:test         # pinned git deps
 clojure -M:lint
 ```
 
-65 tests / 227 assertions. Every placement assertion is a coordinate against a
+66 tests / 232 assertions. Every placement assertion is a coordinate against a
 PDF the test wrote, not a rendering somebody looked at.
 
 Measured out of sample against 30 real PDFs: 12,584 text runs, 2,083 rules, 57

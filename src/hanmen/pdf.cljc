@@ -1123,6 +1123,57 @@
         (page/page {:index index :width width :height height
                     :rotation rotation :items items})))))
 
+(defn- colorspace-name [cs]
+  (case cs
+    (:DeviceGray :CalGray :G) :gray
+    (:DeviceRGB :CalRGB :RGB) :rgb
+    (:DeviceCMYK :CMYK) :cmyk
+    :Indexed :indexed
+    (:DeviceN :Separation) :separation
+    nil))
+
+(defn- colorspace-of
+  "The image's colour space, as a name a host can switch on.
+
+  An `/ICCBased` stream carries `/N` components and nothing else this can
+  use, so it is reported as the device space of that many components — which
+  is what every viewer does and what the profile almost always is. An
+  unknown space is nil rather than a guess: a wrong colour space produces an
+  image in confidently wrong colours, and that reads as a corrupt file."
+  [objs cs]
+  (let [cs (pdf/resolve-ref objs cs)]
+    (cond
+      (keyword? cs) (colorspace-name cs)
+      (vector? cs)
+      (let [head (pdf/resolve-ref objs (first cs))]
+        (cond
+          (= :Indexed head) :indexed
+          (= :ICCBased head)
+          (let [strm (pdf/resolve-ref objs (second cs))]
+            (case (long (or (pdf/resolve-ref objs (:N (:dict strm))) 0))
+              1 :gray 3 :rgb 4 :cmyk nil))
+          :else (colorspace-name head)))
+      :else nil)))
+
+(defn- palette-of
+  "An `/Indexed` space's lookup table, as bytes.
+
+  `[/Indexed base hival lookup]`, where `lookup` is a string or a stream.
+  Only an RGB base is returned — a palette over CMYK or a separation needs a
+  conversion this does not make, and half a palette is worse than none."
+  [objs cs]
+  (let [cs (pdf/resolve-ref objs cs)]
+    (when (and (vector? cs) (= :Indexed (pdf/resolve-ref objs (first cs))))
+      (let [base (pdf/resolve-ref objs (second cs))
+            lookup (pdf/resolve-ref objs (nth cs 3 nil))]
+        (when (= :rgb (colorspace-of objs base))
+          (cond
+            (string? lookup) (mapv #(bit-and (int %) 0xff) lookup)
+            (and (map? lookup) (:pdf.core/stream lookup))
+            (vec (pdf/decode-stream objs lookup))
+            (vector? lookup) (mapv #(bit-and (long %) 0xff) lookup)
+            :else nil))))))
+
 (defn page-images
   "The page's images, in the order `Do` reached them — the order
   `:item/index` counts in.
@@ -1145,6 +1196,14 @@
               (let [xo (pdf/resolve-ref objs ref)
                     d (:dict xo)]
                 {:media-type (image-media-type objs xo)
+                 ;; What the samples ARE, so a host can shape them for an
+                 ;; encoder without re-reading the object. Reported and not
+                 ;; converted: turning CMYK into RGB is a decision about
+                 ;; what a colour means, and this library does not have the
+                 ;; host's answer to that.
+                 :bits (pdf/resolve-ref objs (:BitsPerComponent d))
+                 :colorspace (colorspace-of objs (:ColorSpace d))
+                 :palette (palette-of objs (:ColorSpace d))
                  :width (pdf/resolve-ref objs (:Width d))
                  :height (pdf/resolve-ref objs (:Height d))
                  :bytes (pdf/decode-stream objs xo)}))

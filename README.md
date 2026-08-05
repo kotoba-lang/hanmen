@@ -150,7 +150,11 @@ document that never invokes a form.
 A `DCTDecode` XObject **is** a JPEG. A host can serve those bytes as one with
 no decoder at all — 12 of the 57 images in the sample. The rest are raw samples
 and `:media-type` is nil, which says somebody has to encode them rather than
-guessing a type that arrives at a browser as a broken image.
+guessing a type that arrives at a browser as a broken image. `:bits`,
+`:colorspace` and `:palette` come with them, because a byte count alone
+cannot tell 16-bit gray from 8-bit RGB — they are the same bytes per pixel.
+Reported, never converted: turning CMYK into RGB is a decision about what a
+colour means, and this library does not have the host's answer.
 
 `hanmen.svg` draws an image only when the caller passes `:image-href`, and
 refuses anything that is not a same-origin path:
@@ -223,7 +227,7 @@ clojure -M:test         # pinned git deps
 clojure -M:lint
 ```
 
-63 tests / 218 assertions. Every placement assertion is a coordinate against a
+65 tests / 227 assertions. Every placement assertion is a coordinate against a
 PDF the test wrote, not a rendering somebody looked at.
 
 Measured out of sample against 30 real PDFs: 12,584 text runs, 2,083 rules, 57

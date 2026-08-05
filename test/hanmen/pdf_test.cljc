@@ -549,6 +549,53 @@
     (is (nil? (:item/media-type img))
         "a guessed type arrives at a browser as a broken image")))
 
+(deftest an-image-reports-what-its-samples-are
+  ;; Reported and not converted: turning CMYK into RGB is a decision about
+  ;; what a colour means, and this library does not have the host's answer.
+  ;; Without these a host has only a byte count to infer from, which cannot
+  ;; tell 16-bit gray from 8-bit RGB — they are the same bytes per pixel.
+  (let [img (fn [extra]
+              (first (hpdf/page-images
+                      (xobject-doc "q 10 0 0 10 0 0 cm /X1 Do Q"
+                                   (str "<< /Type /XObject /Subtype /Image "
+                                        "/Width 2 /Height 2 " extra
+                                        " /Length 4 >>\nstream\nABCD\nendstream"))
+                      0)))]
+    (testing "bit depth"
+      (is (= 16 (:bits (img "/BitsPerComponent 16 /ColorSpace /DeviceGray")))))
+    (testing "device spaces"
+      (is (= :gray (:colorspace (img "/BitsPerComponent 8 /ColorSpace /DeviceGray"))))
+      (is (= :rgb (:colorspace (img "/BitsPerComponent 8 /ColorSpace /DeviceRGB"))))
+      (is (= :cmyk (:colorspace (img "/BitsPerComponent 8 /ColorSpace /DeviceCMYK")))))
+    (testing "an unknown space is nil rather than a guess"
+      ;; A wrong colour space produces an image in confidently wrong
+      ;; colours, which reads as a corrupt file.
+      (is (nil? (:colorspace (img "/BitsPerComponent 8 /ColorSpace /Whatever")))))))
+
+(deftest an-indexed-image-carries-its-palette
+  (let [i (first (hpdf/page-images
+                  (xobject-doc
+                   "q 10 0 0 10 0 0 cm /X1 Do Q"
+                   (str "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 "
+                        "/BitsPerComponent 8 "
+                        "/ColorSpace [/Indexed /DeviceRGB 1 <FF0000 00FF00>] "
+                        "/Length 4 >>\nstream\nABCD\nendstream"))
+                  0))]
+    (is (= :indexed (:colorspace i)))
+    (is (= [255 0 0 0 255 0] (:palette i)) "two entries, three components each"))
+
+  (testing "and a palette this cannot convert is absent rather than half-read"
+    (let [i (first (hpdf/page-images
+                    (xobject-doc
+                     "q 10 0 0 10 0 0 cm /X1 Do Q"
+                     (str "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 "
+                          "/BitsPerComponent 8 "
+                          "/ColorSpace [/Indexed /DeviceCMYK 1 <FF000000>] "
+                          "/Length 4 >>\nstream\nABCD\nendstream"))
+                    0))]
+      (is (= :indexed (:colorspace i)))
+      (is (nil? (:palette i))))))
+
 (deftest page-images-are-in-the-order-the-index-counts-in
   ;; The invariant a host depends on. Reading the page's /XObject dictionary
   ;; instead gives RESOURCE order, and the two agree only on a document that

@@ -216,14 +216,28 @@ font that is not the document's, each glyph at its own document x, it read as
 `Cont r act s`, and a reader blames the renderer.
 
 `coalesce` joins runs that are exactly contiguous — the pen's end position is
-known from the advance, so it is an equality test and not a guess. Three
-outcomes, because a gap means three things: nothing is one word, a word space
-is one phrase with the space put back, and anything wider ends the run. That
-last threshold is what stops a two-column line becoming one sentence.
+known from the advance, so it is an equality test and not a guess. **Nothing
+is ever inserted between them.**
 
-Measured across 47 real documents: text runs 11,568 → 5,681, runs of a single
-character 72.4% → 38.0%, and characters 20,909 → **27,276** — the rise is the
-word spaces coming back.
+That is a reversal. An earlier version put a space back whenever the gap
+looked like one, and on a real cover page it produced
+`F o r m  a l V e r i f i c a t i o n`: a space between every pair of
+letters. The gaps on that page formed one continuous spread with no break
+anywhere, so no threshold separated letter-spacing from a word space — every
+choice invents characters somewhere.
+
+The root cause was worth more than the heuristic. The advance was scaled by
+the CTM but **not by the text matrix**, so a producer that sets `Tf 1` and
+sizes with `Tm` — extremely common — got a width a whole font size too
+small: 0.61 where the glyph advanced 14.90. Every run looked separated from
+the next. With both matrices applied the glyphs are flush and join into
+words on their own.
+
+Measured across 45 documents: **6,289 fabricated space characters removed**,
+and the pages still read as words (`Formal`, `OpenZeppelin`) rather than
+letters. A caller that wants a line joins the runs itself — `reading-text`
+does, which is a presentation choice made at the edge rather than a
+character smuggled into the model.
 
 ## Reading order is a guess, kept apart from the fact
 
@@ -271,7 +285,7 @@ clojure -M:test         # pinned git deps
 clojure -M:lint
 ```
 
-72 tests / 249 assertions. Every placement assertion is a coordinate against a
+73 tests / 253 assertions. Every placement assertion is a coordinate against a
 PDF the test wrote, not a rendering somebody looked at.
 
 Measured out of sample against 30 real PDFs: 12,584 text runs, 2,083 rules, 57

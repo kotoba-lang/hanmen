@@ -44,11 +44,27 @@
 
   A composite (`/Type0`) font's codes are not characters — with `Identity-H`
   they are glyph ids, and mapping them needs the font's `/ToUnicode` CMap.
-  This reads `beginbfchar` / `beginbfrange` and uses it. A `/Type0` run with
-  no usable `/ToUnicode` becomes a `:frame` marked `:font/no-tounicode`
-  rather than a run of mojibake: text nobody can read is worse than a marked
-  region, because it goes into search results and into anything that quotes
-  the page."
+  This reads `beginbfchar` / `beginbfrange` and uses it.
+
+  A run neither route can read becomes a `:frame` marked
+  `:font/no-tounicode` rather than a run of mojibake: text nobody can read
+  is worse than a marked region, because it goes into search results and
+  into anything that quotes the page.
+
+  ## What is actually missing when that happens, measured
+
+  The obvious fallback is the embedded font's own `cmap`, read backwards —
+  `opentype.cmap` exists for exactly that. It is **not wired in here, and
+  the measurement is why**. Across 160 real documents and 576 `/Type0`
+  fonts: 549 ship `/ToUnicode` and are already read; 25 do not and are
+  `CIDFontType0C`; 2 have no embedded font at all; and **zero** are the SFNT
+  case the `cmap` route would have helped.
+
+  `CIDFontType0C` is bare CFF and has no `cmap` table to read. Decoding one
+  needs its charset (CID per glyph) and then a registry CMap resource —
+  Adobe-Japan1-UCS2 and its siblings — neither of which exists in this
+  workspace. So the frame names both the ordering and the font kind, and the
+  next person does not repeat the dead end this docstring records."
   (:require [clojure.string :as str]
             [hanmen.page :as page]
             [pdf.core :as pdf]))
@@ -282,6 +298,9 @@
                             ;; Named so a refusal can say WHICH CMap resource
                             ;; would decode it. "Adobe-Japan1" is a fact the
                             ;; reader can act on; "cannot decode" is not.
+                            ;; `:embedded` says which kind of font file is
+                            ;; there, because that decides WHICH decoder is
+                            ;; missing — see the ns docstring.
                             :ordering (when (= subtype :Type0)
                                         (let [desc (first (pdf/resolve-ref
                                                            objs (:DescendantFonts fd)))
@@ -294,6 +313,18 @@
                                                 (str (apply str (map char reg)) "-"
                                                      (apply str (map char ord))))))))
                             :to-unicode tu-map
+                            :embedded (when (= subtype :Type0)
+                                        (let [d (pdf/resolve-ref
+                                                 objs (first (pdf/resolve-ref
+                                                              objs (:DescendantFonts fd))))
+                                              desc (pdf/resolve-ref objs (:FontDescriptor d))]
+                                          (cond
+                                            (:FontFile2 desc) :sfnt
+                                            (:FontFile3 desc)
+                                            (or (:Subtype (:dict (pdf/resolve-ref
+                                                                  objs (:FontFile3 desc))))
+                                                :fontfile3)
+                                            :else :none)))
                             :widths (when (and (number? first-char) (vector? widths))
                                       (into {}
                                             (keep-indexed
@@ -368,8 +399,13 @@
              (page/frame-item {:x x :y (- y drawn-size) :width (* advance (y-scale ctm))
                                :height drawn-size
                                :label (str (or (:base-font fd) "text")
-                                           (when (:ordering fd)
-                                             (str " (" (:ordering fd) ")")))
+                                           (when (or (:ordering fd) (:embedded fd))
+                                             (str " ("
+                                                  (str/join ", "
+                                                            (remove nil?
+                                                                    [(:ordering fd)
+                                                                     (some-> (:embedded fd) name)]))
+                                                  ")")))
                                :reason :font/no-tounicode})
 
              (str/blank? text) nil

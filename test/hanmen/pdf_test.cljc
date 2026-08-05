@@ -242,6 +242,63 @@
     (is (= "KozMin" (:item/label f)))
     (is (page/scanned? p) "and the page says a search cannot see it")))
 
+(deftest every-fill-colour-operator-records-ink
+  ;; `g` and `rg` were tracked and `k`/`sc`/`scn` were not, so a fill in CMYK
+  ;; or a named colour space recorded NO ink and drew at full strength —
+  ;; which is the PDF default and therefore not obviously wrong. Seen on a
+  ;; real poster as a pale panel that came out a solid block.
+  (let [ink-of (fn [ops]
+                 (:item/ink (first (filterv #(= :rule (:item/kind %))
+                                            (:page/items
+                                             (page-of (str ops " "
+                                                           (pdf/rect-command
+                                                            {:x 0 :y 0 :width 10
+                                                             :height 10 :fill? true}))))))))]
+    (is (= 1.0 (ink-of "0 g")) "black")
+    (is (= 0.0 (ink-of "1 g")) "white is no ink at all")
+    (is (= 1.0 (ink-of "0 0 0 1 k")) "CMYK black is K=1")
+    (is (= 0.0 (ink-of "0 0 0 0 k")) "and CMYK white is nothing")
+    (is (= 0.0 (ink-of "1 sc")) "one component is grey")
+    (is (= 1.0 (ink-of "0 0 0 scn")) "three are RGB")
+    (is (= 0.0 (ink-of "0 0 0 0 scn")) "four are CMYK"))
+
+  (testing "a pattern name leaves the previous colour rather than inventing one"
+    ;; `scn` with a name has no numeric operands. A pattern's average colour
+    ;; is not something this can know.
+    (let [p (page-of (str "0.5 g /P1 scn "
+                          (pdf/rect-command {:x 0 :y 0 :width 5 :height 5
+                                             :fill? true})))
+          [r] (filterv #(= :rule (:item/kind %)) (:page/items p))]
+      (is (= 0.5 (:item/ink r))))))
+
+(deftest a-mark-drawn-off-the-page-is-not-on-the-page
+  ;; Measured on a real poster: a rule at (9321, 10277) on a 2384×3370 page.
+  ;; A drawer's viewBox clips it; a count of what is on the page, a digest
+  ;; over the marks, or anything laying them out itself does not.
+  (let [p (page-of (str (pdf/rect-command {:x 10 :y 10 :width 20 :height 20
+                                           :fill? true})
+                        (pdf/rect-command {:x 5000 :y 5000 :width 20 :height 20
+                                           :fill? true})))
+        rules (filterv #(= :rule (:item/kind %)) (:page/items p))]
+    (is (= 1 (count rules)) "the one on the page")
+    (is (= 10.0 (:item/x (first rules)))))
+
+  (testing "a mark straddling the edge stays whole"
+    ;; Trimming it would need the clip path this does not track, and half a
+    ;; letter is worse than a letter that runs off.
+    (let [p (page-of (pdf/rect-command {:x -10 :y 100 :width 40 :height 10
+                                        :fill? true}))]
+      (is (= 1 (count (filterv #(= :rule (:item/kind %)) (:page/items p)))))))
+
+  (testing "and a text run with no measured width is never dropped for its start"
+    ;; The first version of this deleted the second half of a TJ whose
+    ;; kerning pulled it left past the origin: a baseline START of −5 with
+    ;; an ABSENT width is not a mark that is off the page.
+    (let [p (page-of "BT /F1 10 Tf 1 0 0 1 0 700 Tm [(A) 2000 (B)] TJ ET")
+          runs (filterv #(= :text (:item/kind %)) (:page/items p))]
+      (is (= 2 (count runs)))
+      (is (neg? (:item/x (second runs))) "and it really did start off the left"))))
+
 ;; ── XObjects ─────────────────────────────────────────────────────────────────
 
 (defn- xobject-doc

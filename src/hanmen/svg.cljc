@@ -196,9 +196,19 @@
     image-href]
    (case kind
     :text
-    (let [invisible? (= direction :invisible)]
-      [:text (cond-> {:x x :y y :class (if invisible? "hanmen-text hanmen-text--invisible"
-                                           "hanmen-text")
+    (let [invisible? (= direction :invisible)
+          ;; Knocked out of a dark panel rather than printed on paper.
+          ;;
+          ;; A THRESHOLD and not an opacity: text at 0.3 of the ink is not
+          ;; faint text, it is unreadable text, and the distinction the
+          ;; document is making is between ink and the absence of it. The
+          ;; rule under it is already painted, so the paper colour here
+          ;; composites the way the page does.
+          reversed? (and (number? ink) (< ink 0.5) (not invisible?))]
+      [:text (cond-> {:x x :y y
+                      :class (cond invisible? "hanmen-text hanmen-text--invisible"
+                                   reversed? "hanmen-text hanmen-text--reversed"
+                                   :else "hanmen-text")
                       :font-size size
                       :xml:space "preserve"}
                ;; Only when the document shipped widths — see `hanmen.pdf`.
@@ -281,6 +291,11 @@
        "background:var(--hanmen-paper,transparent)}"
        ".hanmen-text{fill:currentColor;font-family:var(--hanmen-font,inherit);"
        "white-space:pre}"
+              ;; `canvas` is the CSS system colour for a page background — white
+       ;; in light mode and dark in dark mode — so a host that never sets
+       ;; `--hanmen-paper` still knocks the text out against the reader's
+       ;; own paper rather than against a hex somebody guessed.
+       ".hanmen-text--reversed{fill:var(--hanmen-paper,canvas)}"
        ".hanmen-rule{fill:currentColor}"
        ".hanmen-image{image-rendering:auto}"
        ".hanmen-frame__box{fill:none;stroke:currentColor;stroke-opacity:.35;"

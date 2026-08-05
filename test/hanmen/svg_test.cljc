@@ -131,6 +131,31 @@
     (is (str/includes? svg/stylesheet "currentColor"))
     (is (str/includes? svg/stylesheet "font-family:var(--hanmen-font,inherit)"))))
 
+(deftest text-knocked-out-of-a-panel-is-painted-in-the-paper
+  ;; Text was the one mark carrying no colour, which is invisible on the
+  ;; documents everybody has — black on white — and wrong on a heading
+  ;; reversed out of a dark panel, where it drew the text in the same ink as
+  ;; the panel under it. Found by looking at a real poster, not by a test.
+  (let [dark (svg/->svg (page-with (page/text-item {:x 0 :y 1 :size 8
+                                                    :text "HEADING" :ink 0.0})))
+        normal (svg/->svg (page-with (page/text-item {:x 0 :y 1 :size 8
+                                                      :text "body" :ink 1.0})))
+        uncoloured (svg/->svg (page-with (page/text-item {:x 0 :y 1 :size 8
+                                                          :text "body"})))]
+    (is (str/includes? dark "hanmen-text--reversed"))
+    (is (not (str/includes? normal "hanmen-text--reversed")))
+    (is (not (str/includes? uncoloured "hanmen-text--reversed"))
+        "no ink recorded is black, per the PDF initial state")
+    (is (str/includes? svg/stylesheet "var(--hanmen-paper,canvas)")
+        "the reader's paper, not a hex somebody guessed"))
+
+  (testing "and an invisible OCR layer stays invisible rather than reversed"
+    (let [ocr (svg/->svg (page-with (page/text-item {:x 0 :y 1 :size 8 :text "ocr"
+                                                     :ink 0.0
+                                                     :direction :invisible})))]
+      (is (str/includes? ocr "hanmen-text--invisible"))
+      (is (not (str/includes? ocr "hanmen-text--reversed"))))))
+
 (deftest ink-density-survives-and-colour-does-not
   (let [light (svg/->svg (page-with (page/rule-item {:x 0 :y 0 :width 5 :height 1
                                                      :ink 0.25})))

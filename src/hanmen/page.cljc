@@ -37,7 +37,7 @@
   wanted the unrotated box would have to un-rotate, which nothing wants.
 
   Everything here is pure and portable: no store, no clock, no host."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def schema "kotoba-lang.hanmen.page.v1")
 
@@ -397,7 +397,7 @@
 
 ;; ── text, for search ─────────────────────────────────────────────────────────
 
-(defn- normalize [s] (str/lower-case (str/replace (str s) #"\s+" " ")))
+(defn- normalize [s] (str/lower (str/replace (str s) #"\s+" " ")))
 
 (defn matches?
   "Whether `needle` appears in this page's text.

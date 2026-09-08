@@ -6,7 +6,7 @@
   space is arithmetic with one right answer rather than a rendering somebody
   looked at and thought seemed fine. Every assertion below is a coordinate,
   not a screenshot."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [hanmen.page :as page]
             [hanmen.pdf :as hpdf]
@@ -305,7 +305,7 @@
                   "4 0 obj\n<< /Length 90 >>\nstream\n" content "\nendstream\nendobj\n"
                   "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
                   "/FirstChar 32 /LastChar 126 /Widths ["
-                  (clojure.string/join " " (repeat 95 "500")) "] >>\nendobj\n"
+                  (str/join " " (repeat 95 "500")) "] >>\nendobj\n"
                   "trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n")]
     (pdf/parse (mapv #(bit-and (int %) 0xff)
                      #?(:clj (.getBytes ^String text "ISO-8859-1")

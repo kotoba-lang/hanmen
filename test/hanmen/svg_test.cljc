@@ -3,7 +3,7 @@
 
   Most of this file is about what does NOT come out, because the value of an
   allowlist is entirely in the cases it refuses."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [hanmen.page :as page]
             [hanmen.svg :as svg]))

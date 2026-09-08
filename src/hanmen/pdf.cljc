@@ -65,7 +65,7 @@
   Adobe-Japan1-UCS2 and its siblings — neither of which exists in this
   workspace. So the frame names both the ordering and the font kind, and the
   next person does not repeat the dead end this docstring records."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [hanmen.page :as page]
             [pdf.core :as pdf]))
 

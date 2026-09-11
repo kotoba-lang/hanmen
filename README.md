@@ -280,9 +280,9 @@ why these are two functions.
 ## Test
 
 ```sh
-clojure -M:local:test   # sibling checkouts
-clojure -M:test         # pinned git deps
-clojure -M:lint
+kbb -M:local:test   # sibling checkouts
+kbb -M:test         # pinned git deps
+kbb -M:lint
 ```
 
 73 tests / 253 assertions. Every placement assertion is a coordinate against a

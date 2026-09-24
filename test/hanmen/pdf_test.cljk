@@ -7,7 +7,7 @@
   looked at and thought seemed fine. Every assertion below is a coordinate,
   not a screenshot."
   (:require [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [hanmen.page :as page]
             [hanmen.pdf :as hpdf]
             [pdf.core :as pdf]))

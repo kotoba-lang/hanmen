@@ -1,5 +1,5 @@
 (ns hanmen.page-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [hanmen.page :as page]))
 
 (deftest rounding-is-the-same-arithmetic-everywhere
